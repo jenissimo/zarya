@@ -1,0 +1,50 @@
+# Объектные файлы и бинарники
+*.o
+*.ko
+*.obj
+*.elf
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+
+# Файлы сборки
+build/
+bin/
+Debug/
+Release/
+
+# Файлы зависимостей
+*.d
+
+# Прекомпилированные заголовки
+*.gch
+*.pch
+
+# Библиотеки
+*.lib
+*.a
+*.la
+*.lo
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Файлы IDE и редакторов
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Файлы системы Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Временные файлы
+*.log
+*.tmp 
