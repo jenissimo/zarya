@@ -6,6 +6,20 @@
 #include "errors.h"
 #include "zarya_config.h"
 
+// Номера тритов в регистре флагов
+#define FLAG_INTERRUPT_TRIT  0  // Разрешение прерываний (1 - разрешены, -1 - запрещены)
+#define FLAG_HALT_TRIT      1  // Флаг остановки (-1 - остановка)
+#define FLAG_ZERO_TRIT      2  // Флаг нуля (1 - результат равен нулю)
+#define FLAG_NEGATIVE_TRIT  3  // Флаг отрицательного результата (1 - результат отрицательный)
+#define FLAG_OVERFLOW_TRIT  4  // Флаг переполнения (1 - было переполнение)
+
+// Макросы для работы с флагами
+#define GET_FLAG(vm, flag_trit)     ((vm)->flags.trits[flag_trit])
+#define SET_FLAG(vm, flag_trit, value) do { \
+    (vm)->flags.trits[flag_trit] = (value); \
+    update_tryte_value(&(vm)->flags); \
+} while(0)
+
 // Callback для обработки прерываний
 typedef vm_error_t (*vm_interrupt_callback_t)(void* context, int int_num);
 

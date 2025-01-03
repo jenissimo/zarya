@@ -351,6 +351,7 @@ static vm_error_t execute_stack_operation(vm_state_t* vm, const instruction_t* i
                 }
                 vm->memory[addr] = value;
             }
+            return VM_OK;
             break;
         }
         
@@ -447,147 +448,115 @@ static vm_error_t execute_stack_operation(vm_state_t* vm, const instruction_t* i
 static vm_error_t execute_control(vm_state_t* vm, const instruction_t* inst) {
     if (!vm || !inst) return VM_ERROR_INVALID_ADDRESS;
     
-    // Получаем базовый опкод и режим адресации
-    trit_t addr_mode = GET_ADDR_MODE(inst->opcode.value);
+    // Получаем базовый опкод
     int base_opcode = GET_BASE_OPCODE(inst->opcode.value);
     
-    // Получаем операнды из стека
-    tryte_t addr, cond;
+    tryte_t addr, value;
     vm_error_t err;
     
     switch (base_opcode) {
         case OP_JMP: {
-            // Снимаем адрес со стека
-            err = stack_pop(vm, &addr);
-            if (err != VM_OK) return err;
-            
-            // Проверяем адрес
-            if (addr.value < 0 || addr.value >= vm->memory_size) {
-                stack_push(vm, addr);  // Возвращаем адрес в стек
+            // Безусловный переход по адресу из операнда
+            addr = inst->operand1;
+            if (addr.value < 0 || (size_t)addr.value >= vm->memory_size) {
                 return VM_ERROR_INVALID_ADDRESS;
             }
-            
-            // Выполняем безусловный переход
             vm->pc.value = addr.value;
             printf("JMP: jumping to %d\n", addr.value);
             return VM_OK;
         }
         
         case OP_JZ: {
-            // Снимаем условие
-            err = stack_pop(vm, &cond);
+            // Условный переход, если на вершине стека 0
+            err = stack_pop(vm, &value);
             if (err != VM_OK) return err;
             
-            // Снимаем адрес
-            err = stack_pop(vm, &addr);
-            if (err != VM_OK) {
-                stack_push(vm, cond);
-                return err;
-            }
-            
-            // Проверяем адрес
-            if (addr.value < 0 || addr.value >= vm->memory_size) {
-                stack_push(vm, addr);
-                stack_push(vm, cond);
-                return VM_ERROR_INVALID_ADDRESS;
-            }
-            
-            // В троичной логике:
-            // -1 (ложь) -> не переходим
-            //  0 (неопределенность) -> переходим
-            //  1 (истина) -> не переходим
-            if (cond.value == 0) {
+            if (value.value == 0) {
+                addr = inst->operand1;
+                if (addr.value < 0 || (size_t)addr.value >= vm->memory_size) {
+                    return VM_ERROR_INVALID_ADDRESS;
+                }
                 vm->pc.value = addr.value;
-                printf("JZ: value=%d (zero), jumping to %d\n", cond.value, addr.value);
+                printf("JZ: jumping to %d\n", addr.value);
             } else {
-                vm->pc.value += INSTRUCTION_SIZE;
-                printf("JZ: value=%d (not zero), not jumping\n", cond.value);
+                vm->pc.value += 6;  // Пропускаем текущую и следующую инструкцию
+                printf("JZ: not jumping, moving to %d\n", vm->pc.value);
             }
             return VM_OK;
         }
         
         case OP_JNZ: {
-            // Снимаем условие
-            err = stack_pop(vm, &cond);
+            // Условный переход, если на вершине стека не 0
+            err = stack_pop(vm, &value);
             if (err != VM_OK) return err;
             
-            // Снимаем адрес
-            err = stack_pop(vm, &addr);
-            if (err != VM_OK) {
-                stack_push(vm, cond);
-                return err;
-            }
-            
-            // Проверяем адрес
-            if (addr.value < 0 || addr.value >= vm->memory_size) {
-                stack_push(vm, addr);
-                stack_push(vm, cond);
-                return VM_ERROR_INVALID_ADDRESS;
-            }
-            
-            // В троичной логике:
-            // -1 (ложь) -> переходим
-            //  0 (неопределенность) -> не переходим
-            //  1 (истина) -> переходим
-            if (cond.value != 0) {
+            if (value.value != 0) {
+                addr = inst->operand1;
+                if (addr.value < 0 || (size_t)addr.value >= vm->memory_size) {
+                    return VM_ERROR_INVALID_ADDRESS;
+                }
                 vm->pc.value = addr.value;
-                printf("JNZ: value=%d (not zero), jumping to %d\n", cond.value, addr.value);
+                printf("JNZ: value=%d (not zero), jumping to %d\n", value.value, addr.value);
             } else {
-                vm->pc.value += INSTRUCTION_SIZE;
-                printf("JNZ: value=%d (zero), not jumping\n", cond.value);
+                vm->pc.value += 6;  // Пропускаем текущую и следующую инструкцию
+                printf("JNZ: value=%d (zero), moving to %d\n", value.value, vm->pc.value);
             }
             return VM_OK;
         }
-
+        
         case OP_CALL: {
-            // Снимаем адрес со стека
-            err = stack_pop(vm, &addr);
-            if (err != VM_OK) return err;
-            
-            // Проверяем адрес
-            if (addr.value < 0 || addr.value >= vm->memory_size) {
-                stack_push(vm, addr);
+            // Вызов подпрограммы
+            addr = inst->operand1;
+            if (addr.value < 0 || (size_t)addr.value >= vm->memory_size) {
                 return VM_ERROR_INVALID_ADDRESS;
             }
             
             // Сохраняем адрес возврата (следующая инструкция)
-            int return_addr_value = vm->pc.value + INSTRUCTION_SIZE;
-            tryte_t return_addr = create_tryte_from_int(return_addr_value);
-            
-            // Выполняем переход к подпрограмме
-            vm->pc.value = addr.value;
+            tryte_t return_addr_tryte = TRYTE_FROM_INT(vm->pc.value + 6);  // Указываем на следующую инструкцию после CALL
             
             // Кладем адрес возврата в стек
-            err = stack_push(vm, return_addr);
-            if (err != VM_OK) {
-                vm->pc.value = return_addr_value - INSTRUCTION_SIZE;  // Восстанавливаем PC
-                return err;
-            }
+            err = stack_push(vm, return_addr_tryte);
+            if (err != VM_OK) return err;
             
-            printf("CALL: jumping to %d, return addr=%d\n", addr.value, return_addr.value);
+            // Выполняем переход
+            vm->pc.value = addr.value;
+            printf("CALL: jumping to %d, return addr=%d\n", addr.value, return_addr_tryte.value);
             return VM_OK;
         }
         
         case OP_RET: {
-            // Снимаем адрес возврата со стека
-            err = stack_pop(vm, &addr);
+            // Возврат из подпрограммы
+            // Сначала снимаем значение результата
+            err = stack_pop(vm, &value);
             if (err != VM_OK) return err;
             
-            // Проверяем адрес
-            if (addr.value < 0 || addr.value >= vm->memory_size) {
-                stack_push(vm, addr);
+            // Затем снимаем адрес возврата
+            err = stack_pop(vm, &addr);
+            if (err != VM_OK) {
+                stack_push(vm, value);  // Возвращаем значение обратно
+                return err;
+            }
+            
+            if (addr.value < 0 || (size_t)addr.value >= vm->memory_size) {
+                stack_push(vm, value);  // Возвращаем значение обратно
                 return VM_ERROR_INVALID_ADDRESS;
             }
             
-            // Возвращаемся по сохраненному адресу
+            // Кладем результат обратно на стек
+            err = stack_push(vm, value);
+            if (err != VM_OK) return err;
+            
             vm->pc.value = addr.value;
-            printf("RET: returning to %d\n", addr.value);
+            printf("RET: returning to %d with value %d\n", addr.value, value.value);
             return VM_OK;
         }
         
-        case OP_HALT:
-            return VM_ERROR_HALT;
-            
+        case OP_HALT: {
+            printf("HALT: stopping execution\n");
+            SET_FLAG(vm, FLAG_HALT_TRIT, TRIT_NEGATIVE);  // Устанавливаем флаг остановки
+            return VM_OK;  // Возвращаем успешное выполнение
+        }
+        
         default:
             return VM_ERROR_INVALID_OPCODE;
     }
@@ -602,69 +571,80 @@ static vm_error_t execute_memory(vm_state_t* vm, const instruction_t* inst) {
     int base_opcode = GET_BASE_OPCODE(inst->opcode.value);
     
     // Получаем операнды из стека
-    tryte_t addr, value;
+    tryte_t value;
     vm_error_t err;
     
     switch (base_opcode) {
         case OP_LOAD: {
             if (addr_mode == ADDR_MODE_IMMEDIATE) {
-                // Для непосредственной адресации снимаем адрес со стека
-                err = stack_pop(vm, &addr);
-                if (err != VM_OK) return err;
-            } else {
-                // Для других режимов получаем адрес из операнда
-                err = get_operand_value(vm, &inst->operand1, addr_mode, &addr);
-                if (err != VM_OK) return err;
-            }
-            
-            // Проверяем адрес
-            if (addr.value < 0 || addr.value >= vm->memory_size) {
-                if (addr_mode == ADDR_MODE_IMMEDIATE) {
-                    stack_push(vm, addr);
+                // Для непосредственной адресации просто кладем значение в стек
+                value = inst->operand1;
+                return stack_push(vm, value);
+            } else if (addr_mode == ADDR_MODE_REGISTER) {
+                // Для регистровой адресации берем значение из регистра
+                if (inst->operand1.value < 0 || inst->operand1.value >= NUM_REGISTERS) {
+                    return VM_ERROR_INVALID_REGISTER;
                 }
-                return VM_ERROR_INVALID_ADDRESS;
+                value = vm->registers[inst->operand1.value];
+                printf("LOAD: addr=%d, value=%d, mode=%d\n", inst->operand1.value, value.value, addr_mode);
+                return stack_push(vm, value);
+            } else if (addr_mode == ADDR_MODE_INDIRECT) {
+                // Для косвенной адресации берем адрес из регистра и загружаем значение по этому адресу
+                if (inst->operand1.value < 0 || inst->operand1.value >= NUM_REGISTERS) {
+                    return VM_ERROR_INVALID_REGISTER;
+                }
+                int addr = vm->registers[inst->operand1.value].value;
+                if (addr < 0 || (size_t)addr >= vm->memory_size) {
+                    return VM_ERROR_INVALID_ADDRESS;
+                }
+                value = vm->memory[addr];
+                printf("LOAD: addr=%d, value=%d, mode=%d\n", addr, value.value, addr_mode);
+                return stack_push(vm, value);
+            } else {
+                return VM_ERROR_INVALID_ADDRESSING_MODE;
             }
-            
-            // Загружаем значение из памяти
-            value = vm->memory[addr.value];
-            printf("LOAD: addr=%d, value=%d, mode=%d\n", 
-                   addr.value, value.value, addr_mode);
-            
-            // Кладем значение в стек
-            return stack_push(vm, value);
         }
         
         case OP_STORE: {
-            // Снимаем значение и адрес со стека
-            err = stack_pop(vm, &value);  // Сначала значение
+            // Снимаем значение со стека
+            err = stack_pop(vm, &value);
             if (err != VM_OK) return err;
             
+            int addr;
             if (addr_mode == ADDR_MODE_IMMEDIATE) {
-                // Для непосредственной адресации снимаем адрес со стека
-                err = stack_pop(vm, &addr);
-                if (err != VM_OK) {
-                    stack_push(vm, value);
-                    return err;
+                // Для непосредственной адресации используем адрес из операнда
+                addr = inst->operand1.value;
+            } else if (addr_mode == ADDR_MODE_REGISTER) {
+                // Для регистровой адресации берем адрес из регистра
+                if (inst->operand1.value < 0 || inst->operand1.value >= NUM_REGISTERS) {
+                    stack_push(vm, value);  // Возвращаем значение в стек
+                    return VM_ERROR_INVALID_REGISTER;
                 }
+                addr = vm->registers[inst->operand1.value].value;
+            } else if (addr_mode == ADDR_MODE_INDIRECT) {
+                // Для косвенной адресации берем адрес из памяти по адресу из регистра
+                if (inst->operand1.value < 0 || inst->operand1.value >= NUM_REGISTERS) {
+                    stack_push(vm, value);  // Возвращаем значение в стек
+                    return VM_ERROR_INVALID_REGISTER;
+                }
+                int reg_addr = vm->registers[inst->operand1.value].value;
+                if (reg_addr < 0 || (size_t)reg_addr >= vm->memory_size) {
+                    stack_push(vm, value);  // Возвращаем значение в стек
+                    return VM_ERROR_INVALID_ADDRESS;
+                }
+                addr = vm->memory[reg_addr].value;
             } else {
-                // Для других режимов получаем адрес из операнда
-                err = get_operand_value(vm, &inst->operand1, addr_mode, &addr);
-                if (err != VM_OK) {
-                    stack_push(vm, value);
-                    return err;
-                }
+                stack_push(vm, value);  // Возвращаем значение в стек
+                return VM_ERROR_INVALID_ADDRESSING_MODE;
             }
             
-            // Проверяем адрес
-            if (addr.value < 0 || addr.value >= vm->memory_size) {
-                stack_push(vm, value);
+            if (addr < 0 || (size_t)addr >= vm->memory_size) {
+                stack_push(vm, value);  // Возвращаем значение в стек
                 return VM_ERROR_INVALID_ADDRESS;
             }
+            vm->memory[addr] = value;
             
-            // Сохраняем значение в память
-            vm->memory[addr.value] = value;
-            printf("STORE: addr=%d, value=%d, mode=%d\n", 
-                   addr.value, value.value, addr_mode);
+            printf("STORE: addr=%d, value=%d, mode=%d\n", addr, value.value, addr_mode);
             return VM_OK;
         }
         
@@ -677,8 +657,7 @@ static vm_error_t execute_memory(vm_state_t* vm, const instruction_t* inst) {
 static vm_error_t execute_comparison(vm_state_t* vm, const instruction_t* inst) {
     if (!vm || !inst) return VM_ERROR_INVALID_ADDRESS;
     
-    // Получаем базовый опкод и режим адресации
-    trit_t addr_mode = GET_ADDR_MODE(inst->opcode.value);
+    // Получаем базовый опкод
     int base_opcode = GET_BASE_OPCODE(inst->opcode.value);
     
     // Получаем операнды из стека
@@ -703,37 +682,37 @@ static vm_error_t execute_comparison(vm_state_t* vm, const instruction_t* inst) 
     switch (base_opcode) {
         case OP_EQ:
             // Равенство: 1 если равны, -1 если не равны
-            result = create_tryte_from_int(op2.value == op1.value ? 1 : -1);
+            result = TRYTE_FROM_INT(op2.value == op1.value ? 1 : -1);
             printf("EQ: %d == %d = %d\n", op2.value, op1.value, result.value);
             break;
             
         case OP_NEQ:
             // Неравенство: 1 если не равны, -1 если равны
-            result = create_tryte_from_int(op2.value != op1.value ? 1 : -1);
+            result = TRYTE_FROM_INT(op2.value != op1.value ? 1 : -1);
             printf("NEQ: %d != %d = %d\n", op2.value, op1.value, result.value);
             break;
             
         case OP_LT:
             // Меньше: 1 если op2 < op1, -1 если op2 >= op1
-            result = create_tryte_from_int(op2.value < op1.value ? 1 : -1);
+            result = TRYTE_FROM_INT(op2.value < op1.value ? 1 : -1);
             printf("LT: %d < %d = %d\n", op2.value, op1.value, result.value);
             break;
             
         case OP_GT:
             // Больше: 1 если op2 > op1, -1 если op2 <= op1
-            result = create_tryte_from_int(op2.value > op1.value ? 1 : -1);
+            result = TRYTE_FROM_INT(op2.value > op1.value ? 1 : -1);
             printf("GT: %d > %d = %d\n", op2.value, op1.value, result.value);
             break;
             
         case OP_LE:
             // Меньше или равно: 1 если op2 <= op1, -1 если op2 > op1
-            result = create_tryte_from_int(op2.value <= op1.value ? 1 : -1);
+            result = TRYTE_FROM_INT(op2.value <= op1.value ? 1 : -1);
             printf("LE: %d <= %d = %d\n", op2.value, op1.value, result.value);
             break;
             
         case OP_GE:
             // Больше или равно: 1 если op2 >= op1, -1 если op2 < op1
-            result = create_tryte_from_int(op2.value >= op1.value ? 1 : -1);
+            result = TRYTE_FROM_INT(op2.value >= op1.value ? 1 : -1);
             printf("GE: %d >= %d = %d\n", op2.value, op1.value, result.value);
             break;
             
@@ -748,68 +727,66 @@ static vm_error_t execute_comparison(vm_state_t* vm, const instruction_t* inst) 
     return stack_push(vm, result);
 }
 
-// Выполнение операций прерывания
+// Выполнение инструкций прерываний
 static vm_error_t execute_interrupt(vm_state_t* vm, const instruction_t* inst) {
     if (!vm || !inst) return VM_ERROR_INVALID_ADDRESS;
     
-    // Получаем базовый опкод и режим адресации
-    trit_t addr_mode = GET_ADDR_MODE(inst->opcode.value);
+    // Получаем базовый опкод
     int base_opcode = GET_BASE_OPCODE(inst->opcode.value);
     
-    // Получаем значение операнда
-    tryte_t value;
-    vm_error_t err = get_operand_value(vm, &inst->operand1, addr_mode, &value);
-    if (err != VM_OK) return err;
-    
-    // Проверяем, что это операция прерывания
-    if (base_opcode != OP_INT) {
-        return VM_ERROR_INVALID_OPCODE;
-    }
-    
-    // Обрабатываем операцию прерывания
-    switch (value.value) {
-        case 1:  // Включить прерывания
-            vm->flags.value |= FLAG_INTERRUPTS_ENABLED;
-            break;
-            
-        case -1:  // Выключить прерывания
-            vm->flags.value &= ~FLAG_INTERRUPTS_ENABLED;
-            break;
-            
-        case 0:  // Нет операции
-            break;
-            
-        default:  // Вызов прерывания
-            if (!(vm->flags.value & FLAG_INTERRUPTS_ENABLED)) {
+    switch (base_opcode) {
+        case OP_INT: {
+            // Проверяем, разрешены ли прерывания
+            if (GET_FLAG(vm, FLAG_INTERRUPT_TRIT) != TRIT_POSITIVE) {
                 return VM_ERROR_INTERRUPTS_DISABLED;
             }
             
+            // Получаем номер прерывания из стека
+            tryte_t int_num;
+            vm_error_t err = stack_pop(vm, &int_num);
+            if (err != VM_OK) return err;
+            
+            // Вызываем обработчик прерывания
             if (vm->interrupt_callback) {
-                vm->interrupt_callback(vm, value.value);
+                return vm->interrupt_callback(vm->interrupt_context, int_num.value);
             }
-            break;
+            return VM_OK;
+        }
+        
+        case OP_CLI: {
+            // Запрещаем прерывания
+            SET_FLAG(vm, FLAG_INTERRUPT_TRIT, TRIT_NEGATIVE);
+            return VM_OK;
+        }
+        
+        case OP_STI: {
+            // Разрешаем прерывания
+            SET_FLAG(vm, FLAG_INTERRUPT_TRIT, TRIT_POSITIVE);
+            return VM_OK;
+        }
+        
+        default:
+            return VM_ERROR_INVALID_OPCODE;
     }
-    
-    return VM_OK;
 }
 
 // Выполнение инструкции
 vm_error_t execute_instruction(vm_state_t* vm, const instruction_t* inst) {
     if (!vm || !inst) return VM_ERROR_INVALID_ADDRESS;
     
-    // Получаем базовый опкод и режим адресации
-    trit_t addr_mode = GET_ADDR_MODE(inst->opcode.value);
+    // Получаем базовый опкод
     int base_opcode = GET_BASE_OPCODE(inst->opcode.value);
     
+    // Выводим отладочную информацию
     printf("DEBUG: execute_instruction: pc=%d, opcode=%d (base=%d, mode=%d), op1=%d, op2=%d\n",
-           vm->pc.value, inst->opcode.value, base_opcode, addr_mode,
+           vm->pc.value, inst->opcode.value, base_opcode, GET_ADDR_MODE(inst->opcode.value),
            inst->operand1.value, inst->operand2.value);
     
     printf("DEBUG: execute_instruction: memory state at pc: [%d, %d, %d]\n",
            vm->memory[vm->pc.value].value,
            vm->memory[vm->pc.value + 1].value,
            vm->memory[vm->pc.value + 2].value);
-           
+    
     printf("DEBUG: execute_instruction: stack pointer=%d, registers=[%d, %d, %d, %d]\n",
            vm->sp.value,
            vm->registers[0].value,
@@ -817,85 +794,40 @@ vm_error_t execute_instruction(vm_state_t* vm, const instruction_t* inst) {
            vm->registers[2].value,
            vm->registers[3].value);
     
-    // Выполняем инструкцию в зависимости от базового опкода
-    vm_error_t result;
-    switch (base_opcode) {
-        // Операции со стеком
-        case OP_PUSH:
-        case OP_POP:
-        case OP_DUP:
-        case OP_SWAP:
-        case OP_DROP:
-        case OP_OVER:
-            printf("DEBUG: execute_instruction: executing stack operation\n");
-            result = execute_stack_operation(vm, inst);
-            break;
-            
-        // Арифметические операции
-        case OP_ADD:
-        case OP_SUB:
-        case OP_MUL:
-        case OP_DIV:
-            printf("DEBUG: execute_instruction: executing arithmetic operation\n");
-            result = execute_arithmetic(vm, inst);
-            break;
-            
-        // Логические операции
-        case OP_AND:
-        case OP_OR:
-        case OP_NOT:
-            printf("DEBUG: execute_instruction: executing logical operation\n");
-            result = execute_logical(vm, inst);
-            break;
-            
-        // Операции сравнения
-        case OP_EQ:
-        case OP_NEQ:
-        case OP_LT:
-        case OP_GT:
-        case OP_LE:
-        case OP_GE:
-            printf("DEBUG: execute_instruction: executing comparison operation\n");
-            result = execute_comparison(vm, inst);
-            break;
-            
-        // Операции с памятью
-        case OP_LOAD:
-        case OP_STORE:
-            printf("DEBUG: execute_instruction: executing memory operation\n");
-            result = execute_memory(vm, inst);
-            break;
-            
-        // Операции управления
-        case OP_JMP:
-        case OP_JZ:
-        case OP_JNZ:
-        case OP_CALL:
-        case OP_RET:
-        case OP_HALT:
-            printf("DEBUG: execute_instruction: executing control operation\n");
-            result = execute_control(vm, inst);
-            break;
-            
-        // Операции с прерываниями
-        case OP_INT:
-            printf("DEBUG: execute_instruction: executing interrupt operation\n");
-            result = execute_interrupt(vm, inst);
-            break;
-            
-        default:
-            printf("ERROR: Unknown opcode %d (full opcode: %d)\n", base_opcode, inst->opcode.value);
-            return VM_ERROR_INVALID_OPCODE;
+    vm_error_t err = VM_OK;
+    
+    // Выполняем инструкцию в зависимости от группы опкодов
+    if (IS_STACK_OPCODE(base_opcode)) {
+        printf("DEBUG: execute_instruction: executing stack operation\n");
+        err = execute_stack_operation(vm, inst);
+    } else if (IS_ARITHMETIC_OPCODE(base_opcode)) {
+        printf("DEBUG: execute_instruction: executing arithmetic operation\n");
+        err = execute_arithmetic(vm, inst);
+    } else if (IS_LOGICAL_OPCODE(base_opcode)) {
+        printf("DEBUG: execute_instruction: executing logical operation\n");
+        err = execute_logical(vm, inst);
+    } else if (IS_COMPARISON_OPCODE(base_opcode)) {
+        printf("DEBUG: execute_instruction: executing comparison operation\n");
+        err = execute_comparison(vm, inst);
+    } else if (IS_CONTROL_OPCODE(base_opcode)) {
+        printf("DEBUG: execute_instruction: executing control operation\n");
+        err = execute_control(vm, inst);
+    } else if (IS_MEMORY_OPCODE(base_opcode)) {
+        printf("DEBUG: execute_instruction: executing memory operation\n");
+        err = execute_memory(vm, inst);
+    } else if (IS_INTERRUPT_OPCODE(base_opcode)) {
+        printf("DEBUG: execute_instruction: executing interrupt operation\n");
+        err = execute_interrupt(vm, inst);
+    } else {
+        printf("ERROR: Unknown opcode %d (full opcode: %d)\n", base_opcode, inst->opcode.value);
+        err = VM_ERROR_INVALID_OPCODE;
     }
     
-    printf("DEBUG: execute_instruction: operation result=%d\n", result);
-    if (result == VM_OK) {
-        printf("DEBUG: execute_instruction: new stack pointer=%d\n", vm->sp.value);
-        if (vm->sp.value >= 0) {
-            printf("DEBUG: execute_instruction: top of stack=%d\n", 
-                   vm->memory[vm->sp.value].value);
-        }
+    printf("DEBUG: execute_instruction: operation result=%d\n", err);
+    printf("DEBUG: execute_instruction: new stack pointer=%d\n", vm->sp.value);
+    if (vm->sp.value >= 0) {
+        printf("DEBUG: execute_instruction: top of stack=%d\n", vm->memory[vm->sp.value].value);
     }
     
-    return result;
+    return err;
 } 

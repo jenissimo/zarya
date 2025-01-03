@@ -1,8 +1,10 @@
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <stdbool.h>
 #include "zarya_vm.h"
 #include "instructions.h"
+#include "trit_ops.h"
 
 vm_error_t vm_init(vm_state_t* vm, size_t memory_size) {
     if (!vm || memory_size == 0) {
@@ -38,6 +40,7 @@ vm_error_t vm_init(vm_state_t* vm, size_t memory_size) {
     
     // Инициализируем флаги
     vm->flags = TRYTE_FROM_INT(0);
+    SET_FLAG(vm, FLAG_INTERRUPT_TRIT, TRIT_POSITIVE);  // Разрешаем прерывания по умолчанию
     
     // Инициализируем обработчик прерываний
     vm->interrupt_callback = NULL;
@@ -79,6 +82,7 @@ void vm_reset(vm_state_t* vm) {
     
     // Сбрасываем флаги
     vm->flags = TRYTE_FROM_INT(0);
+    SET_FLAG(vm, FLAG_INTERRUPT_TRIT, TRIT_POSITIVE);  // Разрешаем прерывания по умолчанию
     
     // Сохраняем обработчик прерываний
     // vm->interrupt_callback и vm->interrupt_context не меняются
@@ -166,24 +170,42 @@ vm_error_t vm_step(vm_state_t* vm) {
     return VM_OK;
 }
 
-vm_error_t vm_run(vm_state_t* vm) {
-    if (!vm) {
-        return VM_ERROR_INVALID_PARAMETER;
+// Чтение инструкции из памяти
+static vm_error_t fetch_instruction(vm_state_t* vm, instruction_t* inst) {
+    if (!vm || !inst) return VM_ERROR_INVALID_ADDRESS;
+    
+    // Проверяем выход за границы памяти
+    if (vm->pc.value < 0 || (size_t)vm->pc.value >= vm->memory_size) {
+        return VM_ERROR_INVALID_ADDRESS;
     }
+    
+    // Проверяем, что хватает места для всей инструкции
+    if ((size_t)vm->pc.value + 2 >= vm->memory_size) {
+        return VM_ERROR_INVALID_ADDRESS;
+    }
+    
+    // Читаем инструкцию
+    inst->opcode = vm->memory[vm->pc.value];
+    inst->operand1 = vm->memory[vm->pc.value + 1];
+    inst->operand2 = vm->memory[vm->pc.value + 2];
+    
+    return VM_OK;
+}
 
-    while (true) {
-        if (vm->pc.value < 0 || (size_t)vm->pc.value >= vm->memory_size) {
-            return VM_ERROR_INVALID_ADDRESS;
+vm_error_t vm_run(vm_state_t* vm) {
+    if (!vm) return VM_ERROR_INVALID_ADDRESS;
+    
+    while (1) {
+        // Проверяем флаг остановки
+        if (GET_FLAG(vm, FLAG_HALT_TRIT) == TRIT_NEGATIVE) {
+            printf("VM halted by flag\n");
+            return VM_OK;
         }
-
-        vm_error_t result = vm_step(vm);
         
-        // Проверяем результат выполнения
-        if (result == VM_ERROR_HALT) {
-            return VM_OK;  // Нормальное завершение по HALT
-        }
-        if (result != VM_OK) {
-            return result;  // Возвращаем ошибку
+        // Выполняем один шаг
+        vm_error_t err = vm_step(vm);
+        if (err != VM_OK) {
+            return err;
         }
     }
 }

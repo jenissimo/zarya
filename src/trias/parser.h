@@ -1,41 +1,51 @@
 #ifndef TRIAS_PARSER_H
 #define TRIAS_PARSER_H
 
-#include <stdlib.h>
 #include "lexer.h"
 #include "ast.h"
-#include "trias_instructions.h"
+#include "symbol_table.h"
 
-#define MAX_LABEL_LENGTH 256
+// Тип парсера
+typedef struct parser parser_t;
 
-// Таблица символов
-typedef struct {
-    label_info_t* labels;    // Список меток
-    int label_count;         // Количество меток
-    int current_address;     // Текущий адрес для генерации кода
-} symbol_table_t;
+// Создание парсера
+parser_t* parser_create(lexer_t* lexer);
 
-// Парсер
-typedef struct {
-    lexer_t* lexer;          // Лексический анализатор
-    token_t current;         // Текущий токен
-    token_t previous;        // Предыдущий токен
-    bool had_error;          // Флаг наличия ошибки
-    bool panic_mode;         // Режим паники
-    const char* error_message; // Сообщение об ошибке
-    symbol_table_t symbols;  // Таблица символов
-} parser_t;
+// Установка зависимостей
+void parser_set_symbol_table(parser_t* parser, symbol_table_t* table);
+void parser_set_ast_manager(parser_t* parser, ast_manager_t* ast);
 
-// Публичный API
+// Разбор программы
+ast_program_t* parser_parse_program(parser_t* parser);
 
-// Инициализация и освобождение парсера
-void parser_init(parser_t* parser, lexer_t* lexer);
-void parser_free(parser_t* parser);
+// Разбор метки
+ast_label_t* parser_parse_label(parser_t* parser, const char* label_name, const source_loc_t* label_loc);
 
-// Основная функция разбора
-ast_node_t* parse_program(parser_t* parser);
+// Разбор директивы
+ast_directive_t* parser_parse_directive(parser_t* parser);
 
-// Проверка состояния
-bool parser_had_error(const parser_t* parser);
+// Разбор инструкции
+ast_instruction_t* parser_parse_instruction(parser_t* parser);
 
-#endif // TRIAS_PARSER_H 
+// Разбор операнда
+ast_operand_t* parser_parse_operand(parser_t* parser);
+
+// Проверка текущего токена
+bool parser_match_token(parser_t* parser, token_type_t type);
+
+// Ожидание определенного токена
+bool parser_expect_token(parser_t* parser, token_type_t type);
+
+// Пропуск текущего токена
+void parser_consume_token(parser_t* parser);
+
+// Получение текста ошибки
+const char* parser_get_error(const parser_t* parser);
+
+// Получение позиции ошибки
+source_loc_t parser_get_error_location(const parser_t* parser);
+
+// Уничтожение парсера
+void parser_destroy(parser_t* parser);
+
+#endif // TRIAS_PARSER_H

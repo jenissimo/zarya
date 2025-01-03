@@ -1,34 +1,37 @@
 #ifndef TRIAS_INSTRUCTIONS_H
 #define TRIAS_INSTRUCTIONS_H
 
-#include "zarya_vm.h"
-#include "ast.h"
-#include "codegen.h"
+#include "instruction_defs.h"
+#include "types.h"
+#include <stdbool.h>
 
-// Тип обработчика инструкции
-typedef vm_error_t (*instruction_handler_t)(codegen_t* gen, ast_node_t** operands);
-
-// Информация об инструкции
+// Структура для информации об инструкции
 typedef struct {
     const char* name;          // Имя инструкции
-    int type;                  // Тип инструкции (опкод)
+    int type;                  // Тип инструкции
     int operand_count;         // Количество операндов
-    const char* description;   // Описание инструкции
+    const char* description;   // Описание
     const char* group;         // Группа инструкций
-    instruction_handler_t handler; // Обработчик (NULL для базовых инструкций)
 } instruction_info_t;
 
-// Получение информации об инструкции по имени
-const instruction_info_t* get_instruction_info(const char* name);
+// Структура для хранения информации об операнде
+typedef struct {
+    int value;              // Значение операнда
+    trit_t addressing_mode; // Режим адресации
+} operand_t;
 
-// Обработчики псевдоинструкций
-vm_error_t handle_mov(codegen_t* gen, ast_node_t** operands);
-vm_error_t handle_inc(codegen_t* gen, ast_node_t** operands);
-vm_error_t handle_dec(codegen_t* gen, ast_node_t** operands);
-vm_error_t handle_pushr(codegen_t* gen, ast_node_t** operands);
-vm_error_t handle_popr(codegen_t* gen, ast_node_t** operands);
-vm_error_t handle_clear(codegen_t* gen, ast_node_t** operands);
-vm_error_t handle_cmp(codegen_t* gen, ast_node_t** operands);
-vm_error_t handle_test(codegen_t* gen, ast_node_t** operands);
+// Структура для представления инструкции в ассемблере
+typedef struct {
+    const char* name;       // Имя инструкции
+    int opcode;            // Базовый опкод
+    operand_t operands[2]; // Операнды (максимум 2)
+    size_t operand_count;  // Фактическое количество операндов
+} trias_instruction_t;
+
+// API для работы с инструкциями
+bool trias_instruction_parse(const char* text, trias_instruction_t* out_instruction);
+bool trias_instruction_encode(const trias_instruction_t* inst, tryte_t* out_bytes);
+const char* trias_instruction_get_group(const char* name);
+const char* trias_instruction_get_description(const char* name);
 
 #endif // TRIAS_INSTRUCTIONS_H 

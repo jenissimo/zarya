@@ -3,71 +3,62 @@
 
 #include <stddef.h>
 #include <stdbool.h>
-#include "errors.h"
+#include "zarya_config.h"
 
 // Типы токенов
 typedef enum {
-    TOKEN_EOF = 0,
-    TOKEN_ERROR,
-    TOKEN_NEWLINE,
-    
-    // Однозначные токены
-    TOKEN_COLON,      // :
-    TOKEN_COMMA,      // ,
-    TOKEN_SEMICOLON,  // ;
-    TOKEN_HASH,       // # (непосредственный режим)
-    TOKEN_AT,         // @ (регистровый режим)
-    TOKEN_STAR,       // * (косвенный режим)
-    
-    // Литералы
-    TOKEN_IDENTIFIER, // имя
-    TOKEN_NUMBER,     // число
-    TOKEN_STRING,     // строка
-    TOKEN_CHAR,       // символ
-    
-    // Директивы
-    TOKEN_DIR_ORG,    // .org
-    TOKEN_DIR_DB,     // .db
-    TOKEN_DIR_DW,     // .dw
-    TOKEN_DIR_DS      // .ds
+    TOKEN_EOF,          // Конец файла
+    TOKEN_NEWLINE,      // Перевод строки
+    TOKEN_IDENTIFIER,   // Идентификатор (метка, инструкция)
+    TOKEN_NUMBER,       // Десятичное число
+    TOKEN_BINARY_NUMBER,  // Двоичное число (0b...)
+    TOKEN_OCTAL_NUMBER,  // Восьмеричное число (0o...)
+    TOKEN_HEX_NUMBER,    // Шестнадцатеричное число (0x...)
+    TOKEN_TERNARY_NUMBER, // Троичное число (0t...)
+    TOKEN_DIRECTIVE,    // Директива (.org, .align)
+    TOKEN_COLON,        // Двоеточие (метка)
+    TOKEN_COMMA,        // Запятая
+    TOKEN_HASH,         // # (непосредственное значение)
+    TOKEN_AT,          // @ (косвенная адресация)
+    TOKEN_REGISTER,     // R0-R7
+    TOKEN_ERROR        // Ошибка лексического анализа
 } token_type_t;
 
-// Структура токена
+// Локация в исходном коде
 typedef struct {
-    token_type_t type;     // Тип токена
-    const char* start;     // Начало токена в исходном коде
-    size_t length;         // Длина токена
-    int line;             // Номер строки
-    union {
-        int number;       // Для TOKEN_NUMBER и TOKEN_CHAR
-        char* string;     // Для TOKEN_STRING
-    } value;
+    size_t line;       // Номер строки (1-based)
+    size_t column;     // Номер колонки (1-based)
+} source_loc_t;
+
+// Значение токена
+typedef union {
+    int number;        // Для чисел
+    int reg_num;       // Для регистров
+} token_value_t;
+
+// Токен
+typedef struct {
+    token_type_t type;  // Тип токена
+    source_loc_t loc;   // Позиция в исходном коде
+    const char* text;   // Текстовое представление (может быть NULL)
+    token_value_t value; // Значение токена
 } token_t;
 
-// Структура лексического анализатора
-typedef struct {
-    const char* source;    // Исходный код
-    const char* start;     // Начало текущего токена
-    const char* current;   // Текущая позиция
-    int line;             // Текущая строка
-    bool had_error;       // Флаг ошибки
-    token_t peeked;       // Следующий токен (для предпросмотра)
-    bool has_peeked;      // Флаг наличия предпросмотренного токена
-} lexer_t;
+// Лексер (скрытая реализация)
+typedef struct lexer_t lexer_t;
 
-// Инициализация лексера
-void lexer_init(lexer_t* lexer, const char* source);
+// Создание и уничтожение
+lexer_t* lexer_create(const char* source);
+lexer_t* lexer_create_from_string(const char* input);
+void lexer_destroy(lexer_t* lexer);
 
-// Получение следующего токена
+// Работа с токенами
 token_t lexer_next_token(lexer_t* lexer);
+void lexer_unget_token(lexer_t* lexer, token_t token);
+void token_destroy(token_t* token);
 
-// Предпросмотр следующего токена без его потребления
-token_t lexer_peek(lexer_t* lexer);
-
-// Проверка наличия ошибок
-bool lexer_had_error(const lexer_t* lexer);
-
-// Освобождение ресурсов лексера
-void lexer_free(lexer_t* lexer);
+// Получение ошибок и позиции
+const char* lexer_get_error(const lexer_t* lexer);
+source_loc_t lexer_get_location(const lexer_t* lexer);
 
 #endif // TRIAS_LEXER_H 

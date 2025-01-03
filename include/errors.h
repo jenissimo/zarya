@@ -19,6 +19,11 @@ typedef enum {
     VM_ERROR_SYNTAX,            // Ошибка синтаксиса
     VM_ERROR_INVALID_REGISTER,  // Неверный номер регистра
     VM_ERROR_INVALID_ADDRESSING_MODE,  // Неверный режим адресации
+    
+    // Ошибки таблицы символов
+    VM_ERROR_SYMBOL_NOT_FOUND,       // Символ не найден
+    VM_ERROR_SYMBOL_ALREADY_DEFINED, // Символ уже определён
+    VM_ERROR_INVALID_SCOPE,          // Неверная область видимости
 } vm_error_t;
 
 #endif // ZARYA_ERRORS_H 

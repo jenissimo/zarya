@@ -33,6 +33,43 @@ static inline int get_base_opcode(tryte_t opcode) {
 #define IS_REGISTER(opcode)       (GET_ADDR_MODE(opcode) == ADDR_MODE_REGISTER)
 #define IS_INDIRECT(opcode)       (GET_ADDR_MODE(opcode) == ADDR_MODE_INDIRECT)
 
+// Макрос для определения диапазонов опкодов
+#define DEFINE_OPCODE_RANGES(X) \
+    /* Стековые операции */ \
+    X(STACK,      0,  6) \
+    /* Арифметические операции */ \
+    X(ARITHMETIC, 10, 13) \
+    /* Логические операции */ \
+    X(LOGICAL,    20, 22) \
+    /* Операции сравнения */ \
+    X(COMPARISON, 30, 35) \
+    /* Операции управления */ \
+    X(CONTROL,    40, 45) \
+    /* Операции с памятью */ \
+    X(MEMORY,     60, 61) \
+    /* Операции прерываний */ \
+    X(INTERRUPT,  70, 72)
+
+// Определяем константы для диапазонов
+#define DEFINE_RANGE(name, start, end) \
+    enum { \
+        name##_OPCODE_START = start, \
+        name##_OPCODE_END = end \
+    };
+
+DEFINE_OPCODE_RANGES(DEFINE_RANGE)
+
+// Макрос для проверки принадлежности опкода к группе
+#define IS_OPCODE_IN_RANGE(opcode, start, end) ((opcode) >= (start) && (opcode) <= (end))
+
+// Макросы для проверки типа инструкции
+#define DEFINE_IS_OPCODE(name, start, end) \
+    static inline int IS_##name##_OPCODE(int opcode) { \
+        return IS_OPCODE_IN_RANGE(opcode, name##_OPCODE_START, name##_OPCODE_END); \
+    }
+
+DEFINE_OPCODE_RANGES(DEFINE_IS_OPCODE)
+
 // Макрос для комбинирования режима адресации и опкода
 static inline tryte_t make_opcode(trit_t mode, int op) {
     // Проверяем, что режим адресации в допустимом диапазоне

@@ -4,13 +4,13 @@ setlocal
 REM Проверяем наличие WSL
 wsl --list >nul 2>&1
 if errorlevel 1 (
-    echo ERROR: WSL не установлен
+    echo ERROR: WSL is not installed
     exit /b 1
 )
 
 REM Проверяем наличие директории сборки
 if not exist build (
-    echo ERROR: Проект не собран. Сначала выполните build.bat
+    echo ERROR: Project is not built. Run build.bat first
     exit /b 1
 )
 
@@ -25,7 +25,7 @@ REM Запускаем тесты через WSL с компактным выв�
 wsl cd "%WSL_PATH%/build" ^&^& TEST_OUTPUT_COMPACT=1 ctest -j1 --output-on-failure %*
 
 if errorlevel 1 (
-    echo ERROR: Некоторые тесты не прошли
+    echo ERROR: Some tests failed
     exit /b 1
 )
 

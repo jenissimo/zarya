@@ -1,315 +1,807 @@
+#include "lexer.h"
+#include "logging.h"
+#include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-#include <stdbool.h>
-#include <stdlib.h>  // для strtol, free, strndup
-#include <stdio.h>   // для printf и fflush
-#include "lexer.h"
+#include <stdio.h>
+#include <stdarg.h>
+#include <limits.h>
 
-// Вспомогательные функции
-static bool is_at_end(lexer_t* lexer) {
-    return *lexer->current == '\0';
+// Реальная структура лексера (скрыта от пользователей)
+struct lexer_t {
+    const char* source;     // Исходный текст
+    size_t length;          // Длина текста
+    size_t position;        // Текущая позиция
+    source_loc_t loc;       // Текущая локация
+    char* error_message;    // Сообщение об ошибке (владеем)
+    source_loc_t error_loc; // Позиция ошибки
+    token_t unget_token;    // Возвращенный токен
+    bool has_unget;         // Флаг наличия возвращенного токена
+    bool owns_source;       // Флаг владения исходным текстом
+};
+
+// Создание лексера
+lexer_t* lexer_create(const char* source) {
+    if (!source) return NULL;
+    
+    lexer_t* lexer = calloc(1, sizeof(lexer_t));
+    if (!lexer) return NULL;
+    
+    lexer->source = source;
+    lexer->length = strlen(source);
+    lexer->position = 0;
+    lexer->loc.line = 1;
+    lexer->loc.column = 1;
+    lexer->has_unget = false;
+    lexer->owns_source = false;  // Не владеем исходным текстом
+    
+    return lexer;
 }
 
-static char advance(lexer_t* lexer) {
-    char c = *lexer->current;
-    lexer->current++;
-    return c;
+// Создание лексера из строки
+lexer_t* lexer_create_from_string(const char* input) {
+    if (!input) {
+        LOG_ERROR(LOG_LEXER, "Входная строка равна NULL");
+        return NULL;
+    }
+    
+    // Создаем копию входной строки
+    char* input_copy = strdup(input);
+    if (!input_copy) {
+        LOG_ERROR(LOG_LEXER, "Не удалось создать копию входной строки");
+        return NULL;
+    }
+    
+    // Создаем лексер
+    lexer_t* lexer = calloc(1, sizeof(lexer_t));
+    if (!lexer) {
+        LOG_ERROR(LOG_LEXER, "Не удалось создать лексер");
+        free(input_copy);
+        return NULL;
+    }
+    
+    // Инициализируем поля
+    lexer->source = input_copy;
+    lexer->length = strlen(input);
+    lexer->position = 0;
+    lexer->loc.line = 1;
+    lexer->loc.column = 1;
+    lexer->owns_source = true;  // Владеем копией исходного текста
+    
+    LOG_DEBUG(LOG_LEXER, "Создан лексер для строки длиной %zu", lexer->length);
+    return lexer;
 }
 
-static char peek(lexer_t* lexer) {
-    if (is_at_end(lexer)) return '\0';
-    return *lexer->current;
+// Освобождение памяти
+void lexer_destroy(lexer_t* lexer) {
+    if (!lexer) return;
+    
+    // Освобождаем сообщение об ошибке
+    if (lexer->error_message) {
+        free(lexer->error_message);
+        lexer->error_message = NULL;
+    }
+    
+    // Освобождаем возвращенный токен
+    if (lexer->has_unget) {
+        token_destroy(&lexer->unget_token);
+        lexer->has_unget = false;
+    }
+    
+    // Освобождаем копию исходного текста, только если мы ей владеем
+    if (lexer->owns_source && lexer->source) {
+        free((void*)lexer->source);
+        lexer->source = NULL;
+    }
+    
+    free(lexer);
 }
 
-static char peek_next(lexer_t* lexer) {
-    if (is_at_end(lexer)) return '\0';
-    return lexer->current[1];
+// Освобождение памяти токена
+void token_destroy(token_t* token) {
+    if (!token) return;
+    
+    // Освобождаем текст только для токенов, которые его выделяют
+    switch (token->type) {
+        case TOKEN_IDENTIFIER:
+        case TOKEN_DIRECTIVE:
+        case TOKEN_ERROR:
+        case TOKEN_NUMBER:  // Теперь и для чисел освобождаем текст
+            if (token->text) {
+                free((void*)token->text);
+                token->text = NULL;
+            }
+            break;
+        default:
+            // Для остальных типов токенов text не освобождается
+            token->text = NULL;
+            break;
+    }
+    
+    // Очищаем остальные поля
+    token->type = TOKEN_EOF;
+    token->loc = (source_loc_t){0, 0};
+    token->value.number = 0;
 }
 
-// Пропуск пробельных символов
-static void skip_whitespace(lexer_t* lexer) {
-    for (;;) {
-        char c = peek(lexer);
-        switch (c) {
-            case ' ':
-            case '\r':
-            case '\t':
-                advance(lexer);
-                break;
-            case ';':  // Комментарий
-                // Пропускаем все символы до конца строки
-                while (peek(lexer) != '\n' && !is_at_end(lexer)) {
-                    advance(lexer);
-                }
-                // Не пропускаем символ новой строки
-                break;
-            default:
-                return;
+// Установка ошибки с позицией
+static void lexer_set_error(lexer_t* lexer, const source_loc_t* loc, const char* format, ...) {
+    if (!lexer) return;
+    
+    va_list args;
+    va_start(args, format);
+    
+    // Освобождаем предыдущее сообщение об ошибке
+    if (lexer->error_message) {
+        free(lexer->error_message);
+        lexer->error_message = NULL;
+    }
+    
+    va_list args_copy;
+    va_copy(args_copy, args);
+    size_t size = vsnprintf(NULL, 0, format, args_copy) + 1;
+    va_end(args_copy);
+    
+    lexer->error_message = malloc(size);
+    
+    if (lexer->error_message) {
+        vsnprintf(lexer->error_message, size, format, args);
+    }
+    
+    // Устанавливаем позицию ошибки
+    if (loc) {
+        lexer->error_loc = *loc;
+        LOG_ERROR(LOG_LEXER, "Ошибка на строке %zu, колонка %zu: %s", 
+                 lexer->error_loc.line, lexer->error_loc.column, lexer->error_message);
+    } else {
+        lexer->error_loc = lexer->loc;
+        LOG_ERROR(LOG_LEXER, "Ошибка на строке %zu, колонка %zu: %s", 
+                 lexer->error_loc.line, lexer->error_loc.column, lexer->error_message);
+    }
+    
+    va_end(args);
+}
+
+// Получение текущего символа
+static char lexer_current(const lexer_t* lexer) {
+    return lexer->position < lexer->length ? lexer->source[lexer->position] : '\0';
+}
+
+// Следующий символ
+static void lexer_advance(lexer_t* lexer) {
+    if (lexer->position < lexer->length) {
+        char c = lexer_current(lexer);
+        lexer->position++;
+        
+        if (c == '\n') {
+            lexer->loc.line++;
+            lexer->loc.column = 1;
+        } else {
+            lexer->loc.column++;
         }
     }
 }
 
-// Создание токена ошибки
-static token_t error_token(lexer_t* lexer, const char* message) {
-    token_t token;
-    token.type = TOKEN_ERROR;
-    token.start = message;
-    token.length = strlen(message);
-    token.line = lexer->line;
-    lexer->had_error = true;
+// Пропуск однострочного комментария
+static void lexer_skip_line_comment(lexer_t* lexer) {
+    // Используем lexer_advance для корректного обновления колонки
+    while (lexer_current(lexer) != '\n' && lexer_current(lexer) != '\0') {
+        lexer_advance(lexer);
+    }
+}
+
+// Пропуск многострочного комментария с поддержкой вложенности
+// Пропуск многострочного комментария с поддержкой вложенности
+static bool lexer_skip_block_comment(lexer_t* lexer) {
+    source_loc_t start_loc = lexer->loc;  // Запоминаем позицию начала комментария
+
+    // Пропускаем начальные /*
+    lexer_advance(lexer); // skip '/'
+    lexer_advance(lexer); // skip '*'
+
+    int nested = 1;  // Уровень вложенности
+
+    while (lexer_current(lexer) != '\0') {
+        if (lexer_current(lexer) == '/' && 
+            lexer->position + 1 < lexer->length && 
+            lexer->source[lexer->position + 1] == '*') {
+            // Найдено вложенное /*
+            lexer_advance(lexer);
+            lexer_advance(lexer);
+            nested++;
+            LOG_TRACE(LOG_LEXER, "Вложенный комментарий найден. Уровень вложенности: %d", nested);
+        }
+        else if (lexer_current(lexer) == '*' && 
+                 lexer->position + 1 < lexer->length && 
+                 lexer->source[lexer->position + 1] == '/') {
+            // Найдено закрывающее */
+            lexer_advance(lexer);
+            lexer_advance(lexer);
+            nested--;
+            LOG_TRACE(LOG_LEXER, "Закрывающий символ комментария найден. Уровень вложенности: %d", nested);
+            if (nested == 0) {
+                return true;
+            }
+        }
+        else {
+            lexer_advance(lexer);
+        }
+    }
+
+    // Комментарий не закрыт
+    source_loc_t error_loc = start_loc;
+    error_loc.column += 1; // Устанавливаем колонку на 6 (после '*')
+    lexer_set_error(lexer, &error_loc, "Незакрытый многострочный комментарий начатый на строке %zu, колонка %zu", start_loc.line, start_loc.column);
+    return false;
+}
+
+// Пропуск пробельных символов и комментариев
+static void lexer_skip_whitespace(lexer_t* lexer) {
+    while (true) {
+        char c = lexer_current(lexer);
+        
+        if (c == '\0') {
+            break;
+        } else if (c == '\n') {
+            break;  // Перевод строки обрабатываем как токен
+        } else if (isspace(c)) {
+            // Пропускаем пробельные символы
+            lexer_advance(lexer);
+        } else if (c == ';') {
+            // Однострочный комментарий
+            LOG_TRACE(LOG_LEXER, "Обнаружен однострочный комментарий на строке %zu, колонка %zu", 
+                     lexer->loc.line, lexer->loc.column);
+            lexer_skip_line_comment(lexer);
+        } else if (c == '/' && lexer->position + 1 < lexer->length && 
+                  lexer->source[lexer->position + 1] == '*') {
+            // Многострочный комментарий
+            LOG_TRACE(LOG_LEXER, "Обнаружен многострочный комментарий на строке %zu, колонка %zu", 
+                     lexer->loc.line, lexer->loc.column);
+            if (!lexer_skip_block_comment(lexer)) {
+                break;  // Ошибка в комментарии
+            }
+        } else {
+            break;
+        }
+    }
+}
+
+// Создание токена с текущей локацией
+static token_t lexer_make_token(lexer_t* lexer, token_type_t type) {
+    token_t token = {
+        .type = type,
+        .loc = lexer->loc
+    };
     return token;
 }
 
-// Создание токена
-static token_t make_token(lexer_t* lexer, token_type_t type) {
-    token_t token;
-    token.type = type;
-    token.start = lexer->start;
-    token.length = (size_t)(lexer->current - lexer->start);
-    token.line = lexer->line;
-    return token;
+// Проверка, является ли строка регистром
+static bool is_register(const char* text, token_value_t* value) {
+    if (!text || !value) return false;
+    
+    // Регистр должен начинаться с 'R'
+    if (text[0] != 'R' && text[0] != 'r') return false;
+    
+    // После R должна быть цифра
+    if (!isdigit((unsigned char)text[1])) {
+        LOG_DEBUG(LOG_LEXER, "Некорректный регистр: после R должна быть цифра");
+        return false;
+    }
+    
+    // После цифры не должно быть других символов
+    if (text[2] != '\0') {
+        LOG_DEBUG(LOG_LEXER, "Некорректный регистр: лишние символы после номера");
+        return false;
+    }
+    
+    // Преобразуем номер регистра
+    int reg_num = text[1] - '0';
+    
+    // Проверяем диапазон
+    if (reg_num < 0 || reg_num >= NUM_REGISTERS) {
+        LOG_DEBUG(LOG_LEXER, "Некорректный регистр: номер %d вне диапазона [0-%d]", 
+                 reg_num, NUM_REGISTERS - 1);
+        return false;
+    }
+    
+    value->reg_num = reg_num;
+    return true;
 }
 
-// Разбор числа
-static token_t number(lexer_t* lexer) {
-    printf("DEBUG: number: начало разбора числа\n");
-    fflush(stdout);
+// Чтение идентификатора или ключевого слова
+static token_t lexer_read_identifier(lexer_t* lexer) {
+    token_t token = {0};
+    token.loc = lexer->loc;  // Используем текущую позицию
     
-    // Пропускаем все цифры
-    while (isdigit(peek(lexer))) {
-        advance(lexer);
+    // Читаем все буквы, цифры и подчеркивания
+    size_t start = lexer->position;
+    while (lexer->position < lexer->length && 
+           (isalnum((unsigned char)lexer->source[lexer->position]) || 
+            lexer->source[lexer->position] == '_')) {
+        lexer_advance(lexer);
     }
     
-    // Создаем токен и сохраняем значение
-    token_t token = make_token(lexer, TOKEN_NUMBER);
-    char* temp = strndup(token.start, token.length);
-    token.value.number = atoi(temp);
-    printf("DEBUG: number: разобрано число %d\n", token.value.number);
-    fflush(stdout);
-    free(temp);
-    
-    // Проверяем, есть ли после числа символ новой строки
-    char next = peek(lexer);
-    printf("DEBUG: number: следующий символ '%c' (код %d)\n", next, next);
-    fflush(stdout);
-    
-    // Не пропускаем символ новой строки, он будет обработан при следующем вызове lexer_next_token
-    
-    return token;
-}
-
-// Разбор строки
-static token_t string(lexer_t* lexer) {
-    // Пропускаем начальную кавычку
-    advance(lexer);
-    
-    // Читаем содержимое строки
-    while (peek(lexer) != '"' && !is_at_end(lexer)) {
-        if (peek(lexer) == '\n') lexer->line++;
-        advance(lexer);
-    }
-    
-    if (is_at_end(lexer)) {
-        return error_token(lexer, "Незакрытая строка");
-    }
-    
-    // Пропускаем закрывающую кавычку
-    advance(lexer);
-    
-    // Создаем токен
-    token_t token = make_token(lexer, TOKEN_STRING);
-    // Копируем строку без кавычек
-    token.value.string = strndup(token.start + 1, token.length - 2);
-    return token;
-}
-
-// Разбор символа
-static token_t character(lexer_t* lexer) {
-    // Пропускаем начальную кавычку
-    advance(lexer);
-    
-    if (is_at_end(lexer)) {
-        return error_token(lexer, "Незакрытый символьный литерал");
-    }
-    
-    char c = advance(lexer);
-    
-    if (peek(lexer) != '\'') {
-        return error_token(lexer, "Символьный литерал должен содержать один символ");
-    }
-    
-    // Пропускаем закрывающую кавычку
-    advance(lexer);
-    
-    // Создаем токен
-    token_t token = make_token(lexer, TOKEN_CHAR);
-    token.value.number = c;
-    return token;
-}
-
-// Инициализация лексера
-void lexer_init(lexer_t* lexer, const char* source) {
-    lexer->source = source;
-    lexer->start = source;
-    lexer->current = source;
-    lexer->line = 1;
-    lexer->had_error = false;
-    lexer->has_peeked = false;
-}
-
-// Получение следующего токена
-token_t lexer_next_token(lexer_t* lexer) {
-    printf("DEBUG: lexer_next_token: начало\n");
-    fflush(stdout);
-    
-    // Если есть предпросмотренный токен, возвращаем его
-    if (lexer->has_peeked) {
-        printf("DEBUG: lexer_next_token: возвращаем предпросмотренный токен типа %d\n", lexer->peeked.type);
-        fflush(stdout);
-        lexer->has_peeked = false;
-        return lexer->peeked;
-    }
-    
-    skip_whitespace(lexer);
-    
-    lexer->start = lexer->current;
-    
-    if (is_at_end(lexer)) {
-        printf("DEBUG: lexer_next_token: конец файла\n");
-        fflush(stdout);
-        return make_token(lexer, TOKEN_EOF);
-    }
-    
-    char c = peek(lexer);  // Сначала смотрим на текущий символ
-    printf("DEBUG: lexer_next_token: текущий символ '%c' (код %d)\n", c, c);
-    fflush(stdout);
-    
-    // Проверяем символ новой строки
-    if (c == '\n') {
-        advance(lexer);  // Пропускаем символ новой строки
-        lexer->line++;
-        printf("DEBUG: lexer_next_token: новая строка (номер %d)\n", lexer->line);
-        fflush(stdout);
-        return make_token(lexer, TOKEN_NEWLINE);
-    }
-    
-    // Продолжаем обычный разбор
-    c = advance(lexer);
-    
-    // Проверяем, является ли символ #
-    if (c == '#') {
-        printf("DEBUG: lexer_next_token: токен #\n");
-        fflush(stdout);
-        return make_token(lexer, TOKEN_HASH);
-    }
-    
-    switch (c) {
-        case '@': 
-            printf("DEBUG: lexer_next_token: токен @\n");
-            fflush(stdout);
-            return make_token(lexer, TOKEN_AT);
-        case ',': 
-            printf("DEBUG: lexer_next_token: токен ,\n");
-            fflush(stdout);
-            return make_token(lexer, TOKEN_COMMA);
-        case ':': 
-            printf("DEBUG: lexer_next_token: токен :\n");
-            fflush(stdout);
-            return make_token(lexer, TOKEN_COLON);
-        case '"': 
-            printf("DEBUG: lexer_next_token: начало строки\n");
-            fflush(stdout);
-            return string(lexer);
-        case '\'': 
-            printf("DEBUG: lexer_next_token: начало символа\n");
-            fflush(stdout);
-            return character(lexer);
-    }
-    
-    // Числа
-    if (isdigit(c)) {
-        printf("DEBUG: lexer_next_token: обнаружено число\n");
-        fflush(stdout);
-        token_t token = number(lexer);
-        printf("DEBUG: lexer_next_token: разобрано число %d\n", token.value.number);
-        fflush(stdout);
+    // Копируем текст идентификатора
+    size_t length = lexer->position - start;
+    char* text = malloc(length + 1);
+    if (!text) {
+        lexer_set_error(lexer, &lexer->loc, "Ошибка выделения памяти");
         return token;
     }
     
-    // Идентификаторы и ключевые слова
-    if (isalpha(c) || c == '_' || c == '.') {
-        while (isalnum(peek(lexer)) || peek(lexer) == '_' || peek(lexer) == '.') {
-            advance(lexer);
+    strncpy(text, lexer->source + start, length);
+    text[length] = '\0';
+    
+    // Проверяем, не является ли это регистром
+    token_value_t value = {0};
+    if (is_register(text, &value)) {
+        token.type = TOKEN_REGISTER;
+        token.value = value;
+        free(text);  // Для регистров текст не нужен
+    } else {
+        token.type = TOKEN_IDENTIFIER;
+        token.text = text;
+    }
+    
+    return token;
+}
+
+// Проверка цифры для разных систем счисления
+static bool is_binary_digit(char c) {
+    return c == '0' || c == '1';
+}
+
+static bool is_octal_digit(char c) {
+    return c >= '0' && c <= '7';
+}
+
+static bool is_decimal_digit(char c) {
+    return c >= '0' && c <= '9';
+}
+
+static bool is_hex_digit(char c) {
+    return (c >= '0' && c <= '9') || 
+           (c >= 'a' && c <= 'f') || 
+           (c >= 'A' && c <= 'F');
+}
+
+// Получение значения шестнадцатеричной цифры
+static int hex_digit_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static bool is_ternary_digit(char c) {
+    return c == '+' || c == '0' || c == '-';
+}
+
+// Получение значения троичной цифры в сбалансированной системе
+static int ternary_digit_value(char c) {
+    switch (c) {
+        case '+': return 1;
+        case '0': return 0;
+        case '-': return -1;
+        default: return -2;  // Ошибка
+    }
+}
+
+// Чтение числа в указанной системе счисления
+static bool read_number_base(lexer_t* lexer, int base,
+                          bool (*is_valid_digit)(char),
+                          int (*digit_value_fn)(char),
+                          int* result) {
+    LOG_DEBUG(LOG_LEXER, "Начало разбора числа в системе счисления %d", base);
+    
+    *result = 0;
+    LOG_DEBUG(LOG_LEXER, "Инициализация result = %d", *result);
+    
+    bool has_digits = false;
+    const char* start = lexer->source + lexer->position;
+    
+    while (true) {
+        char c = lexer_current(lexer);
+        
+        // Если встретили не-цифру, прерываем разбор
+        if (!is_valid_digit(c)) {
+            // Для троичных чисел любой символ кроме +0- считаем ошибкой,
+            // но пробельные символы и конец строки должны просто завершать число
+            if (base == 3 && !isspace(c) && c != '\0') {
+                LOG_DEBUG(LOG_LEXER, "Некорректный символ '%c' в троичном числе", c);
+                return false;
+            }
+            // Для остальных систем - только если это буква или цифра
+            if (isalnum(c)) {
+                LOG_DEBUG(LOG_LEXER, "Некорректный символ '%c' в числе", c);
+                return false;
+            }
+            break;
         }
         
-        // Проверяем, не директива ли это
-        size_t length = lexer->current - lexer->start;
-        const char* start = lexer->start;
+        int digit;
+        int prev_result = *result;
         
-        if (length > 0 && start[0] == '.') {
-            if (length == 4 && strncmp(start, ".org", 4) == 0) {
-                return make_token(lexer, TOKEN_DIR_ORG);
-            } else if (length == 3 && strncmp(start, ".db", 3) == 0) {
-                return make_token(lexer, TOKEN_DIR_DB);
-            } else if (length == 3 && strncmp(start, ".dw", 3) == 0) {
-                return make_token(lexer, TOKEN_DIR_DW);
-            } else if (length == 3 && strncmp(start, ".ds", 3) == 0) {
-                return make_token(lexer, TOKEN_DIR_DS);
+        if (digit_value_fn) {
+            digit = digit_value_fn(c);
+            if (digit == -2 || (base != 3 && digit < 0)) {  // -2 означает ошибку для троичной системы
+                LOG_DEBUG(LOG_LEXER, "Некорректная цифра '%c' для системы счисления %d", c, base);
+                return false;
+            }
+        } else {
+            digit = c - '0';
+            if (digit >= base) {
+                LOG_DEBUG(LOG_LEXER, "Цифра %d больше основания системы счисления %d", digit, base);
+                return false;
             }
         }
         
-        token_t token = make_token(lexer, TOKEN_IDENTIFIER);
-        printf("DEBUG: lexer_next_token: идентификатор '%.*s'\n", 
-               (int)token.length, token.start);
-        fflush(stdout);
+        // Для троичной системы используем сбалансированное представление
+        if (base == 3) {
+            // Умножаем на 3 и добавляем троичную цифру (-1, 0, +1)
+            *result = *result * 3 + digit;
+        } else {
+            // Проверка на переполнение для других систем счисления
+            if (*result > INT_MAX / base || 
+                (*result == INT_MAX / base && digit > INT_MAX % base)) {
+                lexer_set_error(lexer, NULL, "Переполнение числа");
+                LOG_DEBUG(LOG_LEXER, "Переполнение при разборе числа");
+                return false;
+            }
+            *result = *result * base + digit;
+        }
+        
+        LOG_DEBUG(LOG_LEXER, "Операция: %d * %d + %d = %d", prev_result, base, digit, *result);
+        
+        has_digits = true;
+        lexer_advance(lexer);
+    }
+    
+    // Для троичных чисел требуем хотя бы одну цифру
+    if (base == 3 && !has_digits) {
+        LOG_DEBUG(LOG_LEXER, "Пустое троичное число");
+        return false;
+    }
+    
+    size_t length = lexer->source + lexer->position - start;
+    LOG_DEBUG(LOG_LEXER, "Успешно разобрано число: %d (длина текста: %zu)", *result, length);
+    return has_digits;
+}
+
+// Модифицированная функция чтения числа
+static token_t lexer_read_number(lexer_t* lexer) {
+    LOG_DEBUG(LOG_LEXER, "Начало разбора числа на позиции %zu", lexer->position);
+    
+    token_t token = {
+        .type = TOKEN_NUMBER,
+        .loc = lexer->loc,
+        .text = NULL,
+        .value = {.number = 0}
+    };
+    
+    const char* start = lexer->source + lexer->position;
+    size_t start_pos = lexer->position;
+    
+    // Обработка знака числа
+    int sign = 1;
+    if (lexer_current(lexer) == '-' || lexer_current(lexer) == '+') {
+        sign = (lexer_current(lexer) == '-') ? -1 : 1;
+        lexer_advance(lexer);
+    }
+    
+    if (lexer_current(lexer) == '0') {
+        LOG_DEBUG(LOG_LEXER, "Обнаружен ведущий ноль на позиции %zu", lexer->position);
+        lexer_advance(lexer);
+        char prefix = lexer_current(lexer);
+        LOG_DEBUG(LOG_LEXER, "Следующий символ после нуля: '%c'", prefix);
+        
+        switch (prefix) {
+            case 'x': case 'X':
+                LOG_DEBUG(LOG_LEXER, "Обнаружен префикс шестнадцатеричного числа");
+                lexer_advance(lexer);
+                token.type = TOKEN_HEX_NUMBER;
+                LOG_DEBUG(LOG_LEXER, "Установлен тип TOKEN_HEX_NUMBER (%d)", token.type);
+                if (!read_number_base(lexer, 16, is_hex_digit, hex_digit_value, &token.value.number)) {
+                    LOG_DEBUG(LOG_LEXER, "Ошибка при разборе шестнадцатеричного числа");
+                    token.type = TOKEN_ERROR;
+                    lexer_set_error(lexer, &token.loc, "Некорректное шестнадцатеричное число");
+                }
+                break;
+                
+            case 'b': case 'B':
+                LOG_DEBUG(LOG_LEXER, "Обнаружен префикс двоичного числа");
+                lexer_advance(lexer);
+                token.type = TOKEN_BINARY_NUMBER;
+                LOG_DEBUG(LOG_LEXER, "Установлен тип TOKEN_BINARY_NUMBER (%d)", token.type);
+                if (!read_number_base(lexer, 2, is_binary_digit, NULL, &token.value.number)) {
+                    LOG_DEBUG(LOG_LEXER, "Ошибка при разборе двоичного числа");
+                    token.type = TOKEN_ERROR;
+                    lexer_set_error(lexer, &token.loc, "Некорректное двоичное число");
+                }
+                break;
+                
+            case 'o': case 'O':
+                LOG_DEBUG(LOG_LEXER, "Обнаружен префикс восьмеричного числа");
+                lexer_advance(lexer);
+                token.type = TOKEN_OCTAL_NUMBER;
+                LOG_DEBUG(LOG_LEXER, "Установлен тип TOKEN_OCTAL_NUMBER (%d)", token.type);
+                if (!read_number_base(lexer, 8, is_octal_digit, NULL, &token.value.number)) {
+                    LOG_DEBUG(LOG_LEXER, "Ошибка при разборе восьмеричного числа");
+                    token.type = TOKEN_ERROR;
+                    lexer_set_error(lexer, &token.loc, "Некорректное восьмеричное число");
+                }
+                break;
+                
+            case 't': case 'T':
+                LOG_DEBUG(LOG_LEXER, "Обнаружен префикс троичного числа");
+                lexer_advance(lexer);
+                token.type = TOKEN_TERNARY_NUMBER;
+                LOG_DEBUG(LOG_LEXER, "Установлен тип TOKEN_TERNARY_NUMBER (%d)", token.type);
+                if (!read_number_base(lexer, 3, is_ternary_digit, ternary_digit_value, &token.value.number)) {
+                    LOG_DEBUG(LOG_LEXER, "Ошибка при разборе троичного числа");
+                    token.type = TOKEN_ERROR;
+                    lexer_set_error(lexer, &token.loc, "Некорректное троичное число");
+                }
+                break;
+                
+            default:
+                if (is_octal_digit(prefix)) {
+                    LOG_DEBUG(LOG_LEXER, "Обнаружено восьмеричное число без префикса");
+                    // Возвращаемся к началу числа для правильного разбора
+                    lexer->position = start_pos;
+                    token.type = TOKEN_OCTAL_NUMBER;
+                    LOG_DEBUG(LOG_LEXER, "Установлен тип TOKEN_OCTAL_NUMBER (%d)", token.type);
+                    if (!read_number_base(lexer, 8, is_octal_digit, NULL, &token.value.number)) {
+                        LOG_DEBUG(LOG_LEXER, "Ошибка при разборе восьмеричного числа");
+                        token.type = TOKEN_ERROR;
+                        lexer_set_error(lexer, &token.loc, "Некорректное восьмеричное число");
+                    }
+                } else {
+                    LOG_DEBUG(LOG_LEXER, "Обнаружен просто ноль");
+                    token.value.number = 0;
+                    lexer->position = start_pos + 1;
+                }
+                break;
+        }
+    } else {
+        LOG_DEBUG(LOG_LEXER, "Разбор десятичного числа");
+        if (!read_number_base(lexer, 10, is_decimal_digit, NULL, &token.value.number)) {
+            LOG_DEBUG(LOG_LEXER, "Ошибка при разборе десятичного числа");
+            token.type = TOKEN_ERROR;
+            lexer_set_error(lexer, &token.loc, "Некорректное десятичное число");
+        }
+    }
+    
+    // Применяем знак к результату
+    token.value.number *= sign;
+    
+    size_t length = lexer->position - start_pos;
+    LOG_DEBUG(LOG_LEXER, "Длина числа: %zu, тип токена: %d", length, token.type);
+    
+    if (length > 0) {
+        char* text = malloc(length + 1);
+        if (text) {
+            memcpy(text, start, length);
+            text[length] = '\0';
+            token.text = text;
+            LOG_DEBUG(LOG_LEXER, "Текст числа: '%s', тип: %d", text, token.type);
+        } else {
+            token.type = TOKEN_ERROR;
+            lexer_set_error(lexer, &token.loc, "Не удалось выделить память для текста числа");
+        }
+    } else {
+        token.type = TOKEN_ERROR;
+        lexer_set_error(lexer, &token.loc, "Пустое число");
+    }
+    
+    LOG_DEBUG(LOG_LEXER, "Возвращаем токен типа %d со значением %d", token.type, token.value.number);
+    return token;
+}
+
+// Чтение директивы
+static token_t lexer_read_directive(lexer_t* lexer) {
+    // Сохраняем начальную позицию (включая точку)
+    source_loc_t start_loc = lexer->loc;
+    
+    // Пропускаем точку
+    lexer_advance(lexer);
+    
+    // Читаем идентификатор
+    token_t token = lexer_read_identifier(lexer);
+    token.type = TOKEN_DIRECTIVE;
+    token.loc = start_loc;  // Восстанавливаем начальную позицию
+    
+    printf("[DEBUG] Создана директива: '%s' на строке %zu, колонка %zu\n", token.text, token.loc.line, token.loc.column);
+    
+    return token;
+}
+
+// Реализация возврата токена
+void lexer_unget_token(lexer_t* lexer, token_t token) {
+    if (!lexer) return;
+    
+    // Если уже есть возвращенный токен, освобождаем его
+    if (lexer->has_unget) {
+        token_destroy(&lexer->unget_token);
+    }
+    
+    // Сохраняем новый токен
+    lexer->unget_token = token;
+    lexer->has_unget = true;
+}
+
+// Изменяем lexer_next_token для поддержки возвращенных токенов
+token_t lexer_next_token(lexer_t* lexer) {
+    if (!lexer) {
+        token_t error = {0};
+        error.type = TOKEN_ERROR;
+        return error;
+    }
+    
+    LOG_DEBUG(LOG_LEXER, "Начало lexer_next_token, позиция %zu", lexer->position);
+    
+    // Если есть возвращенный токен, возвращаем его
+    if (lexer->has_unget) {
+        token_t token = lexer->unget_token;
+        LOG_DEBUG(LOG_LEXER, "Возвращен отложенный токен типа %d", token.type);
+        lexer->has_unget = false;
+        lexer->unget_token.text = NULL;  // Предотвращаем двойное освобождение
         return token;
     }
     
-    printf("DEBUG: lexer_next_token: неожиданный символ\n");
-    fflush(stdout);
-    return error_token(lexer, "Неожиданный символ");
-}
-
-// Предпросмотр следующего токена
-token_t lexer_peek(lexer_t* lexer) {
-    if (lexer->has_peeked) {
-        return lexer->peeked;
+    // Сначала пропускаем пробельные символы и комментарии
+    lexer_skip_whitespace(lexer);
+    
+    token_t token = lexer_make_token(lexer, TOKEN_ERROR);
+    token.loc = lexer->loc;  // Используем текущую позицию
+    
+    LOG_DEBUG(LOG_LEXER, "После пропуска пробелов, текущий символ: '%c'", lexer_current(lexer));
+    
+    // Проверяем наличие ошибки после пропуска пробелов/комментариев
+    if (lexer_get_error(lexer)) {
+        token.loc = lexer->error_loc;  // Используем позицию ошибки
+        printf("[DEBUG] Ошибка лексера на строке %zu, колонка %zu: %s\n", token.loc.line, token.loc.column, lexer->error_message);
+        return token;
     }
     
-    // Сохраняем текущее состояние
-    const char* old_start = lexer->start;
-    const char* old_current = lexer->current;
-    int old_line = lexer->line;
+    char c = lexer_current(lexer);
+    LOG_DEBUG(LOG_LEXER, "Разбор символа '%c' на позиции %zu", c, lexer->position);
     
-    // Получаем следующий токен
-    lexer->peeked = lexer_next_token(lexer);
-    lexer->has_peeked = true;
-    
-    // Восстанавливаем состояние
-    lexer->start = old_start;
-    lexer->current = old_current;
-    lexer->line = old_line;
-    
-    return lexer->peeked;
-}
-
-// Проверка наличия ошибок
-bool lexer_had_error(const lexer_t* lexer) {
-    return lexer->had_error;
-}
-
-// Освобождение ресурсов лексера
-void lexer_free(lexer_t* lexer) {
-    if (lexer == NULL) return;
-    
-    // Освобождаем предпросмотренный токен, если он есть
-    if (lexer->has_peeked && lexer->peeked.type == TOKEN_STRING) {
-        free(lexer->peeked.value.string);
+    if (c == '\0') {
+        token.type = TOKEN_EOF;
+        printf("[DEBUG] Создан EOF на строке %zu, колонка %zu\n", token.loc.line, token.loc.column);
+        return token;
     }
     
-    // Сбрасываем все указатели
-    lexer->source = NULL;
-    lexer->start = NULL;
-    lexer->current = NULL;
-    lexer->has_peeked = false;
+    // Сохраняем позицию начала токена
+    source_loc_t token_start = lexer->loc;
+    
+    // Проверяем, является ли это числом или идентификатором, начинающимся с цифры
+    if (isdigit(c) || ((c == '+' || c == '-') && lexer->position > 0 && 
+        lexer->source[lexer->position - 1] == '#')) {
+        // Если это 0, за которым следует b, o, x или t, то это точно число
+        if (c == '0' && lexer->position + 1 < lexer->length) {
+            char next = lexer->source[lexer->position + 1];
+            if (next == 'b' || next == 'B' || 
+                next == 'o' || next == 'O' || 
+                next == 'x' || next == 'X' || 
+                next == 't' || next == 'T' || 
+                isdigit(next)) {
+                LOG_DEBUG(LOG_LEXER, "Обнаружено число с префиксом или ведущим нулем");
+                token = lexer_read_number(lexer);
+                return token;
+            }
+        }
+        
+        // Проверяем, не является ли это идентификатором, начинающимся с цифры
+        size_t peek_pos = lexer->position;
+        if (c == '+' || c == '-') peek_pos++;  // Пропускаем знак
+        while (peek_pos < lexer->length && isdigit(lexer->source[peek_pos])) {
+            peek_pos++;
+        }
+        if (peek_pos < lexer->length && (isalpha(lexer->source[peek_pos]) || lexer->source[peek_pos] == '_')) {
+            // Это идентификатор, начинающийся с цифры
+            LOG_DEBUG(LOG_LEXER, "Обнаружен идентификатор, начинающийся с цифры");
+            token = lexer_read_identifier(lexer);
+            return token;
+        }
+        
+        // Это обычное число
+        LOG_DEBUG(LOG_LEXER, "Обнаружено обычное число");
+        token = lexer_read_number(lexer);
+        return token;
+    }
+    
+    lexer_advance(lexer);
+    
+    switch (c) {
+        case '\n':
+            token.type = TOKEN_NEWLINE;
+            token.loc = token_start;  // Используем позицию начала токена
+            printf("[DEBUG] Создан NEWLINE на строке %zu, колонка %zu\n", token.loc.line, token.loc.column);
+            break;
+            
+        case ':':
+            token.type = TOKEN_COLON;
+            printf("[DEBUG] Создан COLON на строке %zu, колонка %zu\n", token.loc.line, token.loc.column);
+            break;
+            
+        case ',':
+            token.type = TOKEN_COMMA;
+            printf("[DEBUG] Создан COMMA на строке %zu, колонка %zu\n", token.loc.line, token.loc.column);
+            break;
+            
+        case '#':
+            token.type = TOKEN_HASH;
+            printf("[DEBUG] Создан HASH на строке %zu, колонка %zu\n", token.loc.line, token.loc.column);
+            break;
+            
+        case '@':
+            token.type = TOKEN_AT;
+            printf("[DEBUG] Создан AT на строке %zu, колонка %zu\n", token.loc.line, token.loc.column);
+            break;
+            
+        case '.':
+            if (isalpha(lexer_current(lexer))) {
+                lexer->position--;  // Возвращаемся назад для чтения директивы
+                lexer->loc = token_start;  // Восстанавливаем позицию
+                token = lexer_read_directive(lexer);
+            } else {
+                lexer_set_error(lexer, &token_start, "Ожидался идентификатор директивы после '.'");
+                printf("[DEBUG] Ошибка: Ожидался идентификатор директивы после '.' на строке %zu, колонка %zu\n", token_start.line, token_start.column);
+            }
+            break;
+            
+        case 'R':
+        case 'r':
+            // Возвращаемся назад для чтения всего идентификатора
+            lexer->position--;  // Возвращаемся назад для чтения идентификатора
+            lexer->loc = token_start;  // Восстанавливаем позицию
+            token = lexer_read_identifier(lexer);
+            
+            // Если это не регистр, оставляем как идентификатор
+            if (token.type != TOKEN_REGISTER) {
+                // Если это начинается с R, проверяем, не должен ли это быть регистр
+                if (c == 'R' || c == 'r') {
+                    size_t peek_pos = lexer->position;
+                    while (peek_pos < lexer->length && 
+                           (isalnum((unsigned char)lexer->source[peek_pos]) || 
+                            lexer->source[peek_pos] == '_')) {
+                        peek_pos++;
+                    }
+                    
+                    // Если после R идет цифра, это должен был быть регистр
+                    if (lexer->position < lexer->length && 
+                        isdigit((unsigned char)lexer->source[lexer->position])) {
+                        lexer_set_error(lexer, &token_start, "Некорректный регистр");
+                        token.type = TOKEN_ERROR;
+                        break;
+                    }
+                }
+                LOG_DEBUG(LOG_LEXER, "Идентификатор, начинающийся с R: %s", token.text);
+            }
+            break;
+            
+        default:
+            if (isalpha(c) || c == '_') {
+                lexer->position--;  // Возвращаемся назад для чтения идентификатора
+                lexer->loc = token_start;  // Восстанавливаем позицию
+                token = lexer_read_identifier(lexer);
+            } else {
+                lexer_set_error(lexer, &token_start, "Неожиданный символ '%c'", c);
+                printf("[DEBUG] Неожиданный символ '%c' на строке %zu, колонка %zu\n", c, token_start.line, token_start.column);
+            }
+    }
+    
+    return token;
+}
+
+// Получение текста ошибки
+const char* lexer_get_error(const lexer_t* lexer) {
+    return lexer ? lexer->error_message : NULL;
+}
+
+// Получение текущей позиции
+source_loc_t lexer_get_location(const lexer_t* lexer) {
+    return lexer ? lexer->loc : (source_loc_t){0, 0};
 } 
