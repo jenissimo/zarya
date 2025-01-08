@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdio.h>
+#include "instruction_defs.h"
 #include "instructions.h"
 #include "trit_ops.h"
 #include "stack.h"
@@ -276,7 +277,7 @@ static vm_error_t execute_stack_operation(vm_state_t* vm, const instruction_t* i
     if (!vm || !inst) return VM_ERROR_INVALID_ADDRESS;
     
     // Получаем базовый опкод и режим адресации
-    trit_t addr_mode = GET_ADDR_MODE(inst->opcode.value);
+    trit_t addr_mode = get_addressing_mode(inst);
     int base_opcode = GET_BASE_OPCODE(inst->opcode.value);
     
     printf("Stack operation: opcode=%d, base_opcode=%d, addr_mode=%d\n", 
@@ -567,7 +568,7 @@ static vm_error_t execute_memory(vm_state_t* vm, const instruction_t* inst) {
     if (!vm || !inst) return VM_ERROR_INVALID_ADDRESS;
     
     // Получаем базовый опкод и режим адресации
-    trit_t addr_mode = GET_ADDR_MODE(inst->opcode.value);
+    trit_t addr_mode = get_addressing_mode(inst);
     int base_opcode = GET_BASE_OPCODE(inst->opcode.value);
     
     // Получаем операнды из стека

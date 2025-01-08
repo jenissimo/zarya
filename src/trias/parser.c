@@ -3,6 +3,7 @@
 #include "logging.h"
 #include "ast.h"
 #include "zarya_config.h"
+#include "instruction_defs.h"
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -52,6 +53,11 @@ static void parser_save_token(struct parser_token* dest, const token_t* src) {
         case TOKEN_IDENTIFIER:
         case TOKEN_DIRECTIVE:
         case TOKEN_ERROR:
+        case TOKEN_NUMBER:
+        case TOKEN_BINARY_NUMBER:
+        case TOKEN_OCTAL_NUMBER:
+        case TOKEN_HEX_NUMBER:
+        case TOKEN_TERNARY_NUMBER:
             if (src->text) {
                 dest->text = strdup(src->text);
                 if (dest->text) {
@@ -202,44 +208,44 @@ ast_label_t* parser_parse_label(parser_t* parser, const char* label_name, const 
         return NULL;
     }
     
-    // Проверяем, что метка начинается с буквы
-    if (!isalpha((unsigned char)label_name[0]) && label_name[0] != '_') {
-        parser_set_error(parser, "Метка должна начинаться с буквы или подчеркивания", label_loc);
+    // Определяем локальность метки по значению из токена
+    bool is_local = parser->previous.token.value.number == 1;
+    LOG_DEBUG(LOG_PARSER, "[ПАРСЕР] Разбор метки '%s' (локальная: %d)", label_name, is_local);
+    
+    // Проверяем соответствие имени и флага локальности
+    if ((label_name[0] == '.') != is_local) {
+        parser_set_error(parser, "Несоответствие имени метки и её локальности", label_loc);
         return NULL;
     }
     
-    // Проверяем остальные символы метки
-    for (const char* p = label_name + 1; *p; p++) {
+    // Проверяем символы метки
+    const char* start = is_local ? label_name + 1 : label_name;
+    if (!isalpha((unsigned char)*start) && *start != '_') {
+        parser_set_error(parser, 
+            is_local ? "Локальная метка должна начинаться с буквы или подчеркивания после точки" 
+                    : "Метка должна начинаться с буквы или подчеркивания", 
+            label_loc);
+        return NULL;
+    }
+    
+    for (const char* p = start + 1; *p; p++) {
         if (!isalnum((unsigned char)*p) && *p != '_') {
-            parser_set_error(parser, "Метка может содержать только буквы, цифры и подчеркивания", label_loc);
+            parser_set_error(parser, 
+                "Метка может содержать только буквы, цифры и подчеркивания", 
+                label_loc);
             return NULL;
         }
     }
     
-    // Проверяем, что метка еще не определена
-    symbol_t* existing = symbol_table_lookup_local(parser->symbols, label_name);
-    if (existing && (existing->flags & SYMBOL_FLAG_DEFINED)) {
-        parser_set_error(parser, "Метка уже определена", label_loc);
-        return NULL;
-    }
-    
-    // Создаем узел метки
-    ast_label_t* label = ast_create_label(parser->ast, label_name, false, label_loc);
+    // Создаем узел метки с правильным флагом локальности
+    ast_label_t* label = ast_create_label(parser->ast, label_name, is_local, label_loc);
     if (!label) {
-        parser_set_error(parser, "Не удалось создать узел метки", label_loc);
+        parser_set_error(parser, "Не удалось создать метку", label_loc);
         return NULL;
     }
     
-    // Добавляем метку в таблицу символов
-    tryte_t value = TRYTE_FROM_INT(0);  // Значение будет установлено позже
-    vm_error_t err = symbol_table_add(parser->symbols, label_name, SYMBOL_LABEL,
-                                     value, SYMBOL_FLAG_NONE, *label_loc);
-    
-    if (err != VM_OK) {
-        parser_set_error(parser, "Не удалось добавить метку в таблицу символов", label_loc);
-        ast_unref(&label->base);
-        return NULL;
-    }
+    LOG_DEBUG(LOG_PARSER, "[ПАРСЕР] Создан узел метки '%s' (локальная: %d)", 
+              label_name, label->is_local);
     
     return label;
 }
@@ -263,27 +269,73 @@ static void parser_safe_unref(ast_node_t* node) {
     if (node) ast_unref(node);
 }
 
+// Функция-обертка для добавления операнда к директиве
+static void parser_add_directive_operand(void* directive, ast_operand_t* operand) {
+    LOG_DEBUG(LOG_PARSER, "Добавление операнда к директиве");
+    ast_directive_add_arg((ast_directive_t*)directive, (ast_node_t*)operand);
+    LOG_DEBUG(LOG_PARSER, "Операнд успешно добавлен к директиве");
+}
+
+// Проверка, является ли текущий токен возможным началом операнда
+static bool parser_check_operand_start(parser_t* parser) {
+    if (!parser) return false;
+    
+    token_type_t type = parser->current.token.type;
+    return type == TOKEN_MINUS ||
+           type == TOKEN_AT ||
+           type == TOKEN_HASH ||
+           type == TOKEN_REGISTER ||
+           type == TOKEN_NUMBER ||
+           type == TOKEN_BINARY_NUMBER ||
+           type == TOKEN_OCTAL_NUMBER ||
+           type == TOKEN_HEX_NUMBER ||
+           type == TOKEN_TERNARY_NUMBER ||
+           type == TOKEN_IDENTIFIER;
+}
+
 // Разбор списка операндов (общая логика для инструкций и директив)
 static bool parser_parse_operand_list(parser_t* parser, void* parent,
                                     void (*add_operand)(void*, ast_operand_t*)) {
-    while (!parser_check_token(parser, TOKEN_NEWLINE) && !parser_check_token(parser, TOKEN_EOF)) {
-        ast_operand_t* operand = parser_parse_operand(parser);
+    LOG_DEBUG(LOG_PARSER, "Начало разбора списка операндов");
+    
+    // Проверяем, есть ли операнды
+    if (!parser_check_operand_start(parser)) {
+        LOG_DEBUG(LOG_PARSER, "Список операндов пуст");
+        return true;
+    }
+    
+    // Разбираем первый операнд
+    LOG_DEBUG(LOG_PARSER, "Разбор операнда, текущий токен: тип %d, текст '%s'",
+             parser->current.token.type,
+             parser->current.token.text ? parser->current.token.text : "NULL");
+    
+    ast_operand_t* operand = parser_parse_operand(parser);
+    if (!operand) {
+        LOG_DEBUG(LOG_PARSER, "Не удалось разобрать операнд");
+        return false;
+    }
+    
+    add_operand(parent, operand);
+    ast_unref((ast_node_t*)operand);
+    
+    // Разбираем остальные операнды после запятой
+    while (parser_match_token(parser, TOKEN_COMMA)) {
+        if (!parser_check_operand_start(parser)) {
+            parser_set_error(parser, "Ожидался операнд после запятой", NULL);
+            return false;
+        }
+        
+        operand = parser_parse_operand(parser);
         if (!operand) {
+            LOG_DEBUG(LOG_PARSER, "Не удалось разобрать операнд");
             return false;
         }
         
         add_operand(parent, operand);
         ast_unref((ast_node_t*)operand);
-        
-        if (parser_match_token(parser, TOKEN_COMMA)) {
-            if (parser_check_token(parser, TOKEN_NEWLINE) || parser_check_token(parser, TOKEN_EOF)) {
-                parser_set_error(parser, "Ожидался операнд после запятой", NULL);
-                return false;
-            }
-        } else {
-            break;
-        }
     }
+    
+    LOG_DEBUG(LOG_PARSER, "Завершение разбора списка операндов");
     return true;
 }
 
@@ -318,8 +370,23 @@ ast_program_t* parser_parse_program(parser_t* parser) {
         ast_node_t* stmt = NULL;
         source_loc_t stmt_loc = parser->current.token.loc;
         
+        LOG_DEBUG(LOG_PARSER, "Текущий токен: тип %d, текст '%s'", 
+                 parser->current.token.type,
+                 parser->current.token.text ? parser->current.token.text : "NULL");
+        
         // Определяем тип оператора по первому токену
         switch (parser->current.token.type) {
+            case TOKEN_DIRECTIVE:
+                LOG_DEBUG(LOG_PARSER, "Обнаружена директива '%s'", parser->current.token.text);
+                stmt = (ast_node_t*)parser_parse_directive(parser);
+                if (stmt) {
+                    LOG_DEBUG(LOG_PARSER, "Директива успешно разобрана и добавлена в программу");
+                    ast_program_add_statement(program, stmt);
+                } else {
+                    LOG_ERROR(LOG_PARSER, "Ошибка разбора директивы");
+                }
+                break;
+                
             case TOKEN_IDENTIFIER: {
                 // Сохраняем текущую позицию и копируем текст
                 source_loc_t start_loc = parser->current.token.loc;
@@ -334,23 +401,33 @@ ast_program_t* parser_parse_program(parser_t* parser) {
                 
                 // Проверяем, является ли это меткой
                 if (parser_match_token(parser, TOKEN_COLON)) {
+                    LOG_DEBUG(LOG_PARSER, "Обнаружена метка '%s'", name);
                     stmt = (ast_node_t*)parser_parse_label(parser, name, &start_loc);
                 } else {
-                    stmt = (ast_node_t*)parser_parse_instruction(parser);
+                    // Проверяем, не является ли это директивой
+                    if (is_known_directive(name)) {
+                        LOG_DEBUG(LOG_PARSER, "Обнаружена директива '%s' (без точки)", name);
+                        stmt = (ast_node_t*)parser_parse_directive(parser);
+                    } else {
+                        LOG_DEBUG(LOG_PARSER, "Обнаружена инструкция '%s'", name);
+                        stmt = (ast_node_t*)parser_parse_instruction(parser);
+                    }
                 }
                 
                 free(name);
                 break;
             }
             
-            case TOKEN_DIRECTIVE:
-                stmt = (ast_node_t*)parser_parse_directive(parser);
-                break;
+            case TOKEN_NEWLINE:
+                LOG_DEBUG(LOG_PARSER, "Пропуск перевода строки");
+                parser_advance(parser);
+                continue;
                 
             default: {
                 char error[256];
                 snprintf(error, sizeof(error), "Неожиданный токен типа %d", 
                         parser->current.token.type);
+                LOG_ERROR(LOG_PARSER, "%s", error);
                 parser_set_error(parser, error, &stmt_loc);
                 ast_unref((ast_node_t*)program);
                 return NULL;
@@ -374,6 +451,7 @@ ast_program_t* parser_parse_program(parser_t* parser) {
         parser_match_token(parser, TOKEN_NEWLINE);
     }
     
+    LOG_DEBUG(LOG_PARSER, "Программа успешно разобрана, всего операторов: %zu", program->statement_count);
     return program;
 }
 
@@ -381,24 +459,34 @@ ast_program_t* parser_parse_program(parser_t* parser) {
 ast_directive_t* parser_parse_directive(parser_t* parser) {
     LOG_DEBUG(LOG_PARSER, "Разбор директивы");
     
-    source_loc_t start_loc = parser->current.token.loc;
-    ast_directive_t* directive = ast_create_directive(parser->ast, 
-                                                    parser->current.token.text,
-                                                    &start_loc);
+    source_loc_t start_loc = parser->previous.token.loc;  // Используем позицию из предыдущего токена
+    const char* name = parser->previous.token.text;  // Используем имя из предыдущего токена
+    LOG_DEBUG(LOG_PARSER, "Директива: текст '%s', позиция %zu:%zu", 
+             name ? name : "NULL", start_loc.line, start_loc.column);
+    
+    // Проверяем, является ли директива локальной
+    bool is_local = false;
+    if (name && name[0] == '.') {
+        is_local = true;
+        LOG_DEBUG(LOG_PARSER, "Обнаружена локальная директива");
+    } else {
+        LOG_DEBUG(LOG_PARSER, "Обнаружена глобальная директива");
+    }
+             
+    ast_directive_t* directive = ast_create_directive(parser->ast, name, &start_loc);
     if (!directive) {
         parser_set_error(parser, "Не удалось создать узел директивы", &start_loc);
         return NULL;
     }
     
-    parser_advance(parser);
-    
     if (!parser_parse_operand_list(parser, directive,
-                                  (void(*)(void*,ast_operand_t*))ast_directive_add_arg)) {
+                                  (void(*)(void*,ast_operand_t*))parser_add_directive_operand)) {
         ast_unref((ast_node_t*)directive);
         return NULL;
     }
     
-    LOG_DEBUG(LOG_PARSER, "Директива '%s' успешно разобрана", directive->name);
+    LOG_DEBUG(LOG_PARSER, "Директива '%s' успешно разобрана (%s)", 
+             name, is_local ? "локальная" : "глобальная");
     return directive;
 }
 
@@ -438,11 +526,26 @@ ast_instruction_t* parser_parse_instruction(parser_t* parser) {
 ast_operand_t* parser_parse_operand(parser_t* parser) {
     if (!parser) return NULL;
     
+    LOG_DEBUG(LOG_PARSER, "Начало разбора операнда");
     ast_operand_t* operand = NULL;
     bool is_indirect = false;
+    bool is_negative = false;
+    
+    // Проверяем знак минус
+    if (parser->current.token.type == TOKEN_MINUS) {
+        LOG_DEBUG(LOG_PARSER, "Обнаружен знак минус");
+        is_negative = true;
+        parser_advance(parser);
+    }
     
     // Проверяем косвенную адресацию
     if (parser->current.token.type == TOKEN_AT) {
+        LOG_DEBUG(LOG_PARSER, "Обнаружена косвенная адресация");
+        if (is_negative) {
+            parser_set_error(parser, "Знак минус не может использоваться с косвенной адресацией", NULL);
+            return NULL;
+        }
+        
         is_indirect = true;
         parser_advance(parser);
         
@@ -457,6 +560,7 @@ ast_operand_t* parser_parse_operand(parser_t* parser) {
         if (operand) {
             operand->is_indirect = true;
             operand->type = OPERAND_INDIRECT;  // Устанавливаем правильный тип операнда
+            LOG_DEBUG(LOG_PARSER, "Создан операнд косвенной адресации через регистр");
         }
         parser_advance(parser);
         return operand;
@@ -464,6 +568,7 @@ ast_operand_t* parser_parse_operand(parser_t* parser) {
     
     // Разбираем основной операнд
     if (parser->current.token.type == TOKEN_HASH) {
+        LOG_DEBUG(LOG_PARSER, "Обнаружено непосредственное значение");
         parser_advance(parser);
         
         // Непосредственное значение
@@ -476,18 +581,63 @@ ast_operand_t* parser_parse_operand(parser_t* parser) {
             return NULL;
         }
         
-        operand = ast_create_immediate_operand(parser->ast, parser->current.token.value);
+        operand = ast_create_immediate_operand(parser->ast, parser->current.token.value, parser->current.token.text);
+        if (operand && is_negative) {
+            operand->immediate = -operand->immediate;
+            LOG_DEBUG(LOG_PARSER, "Создан операнд с отрицательным непосредственным значением");
+        } else {
+            LOG_DEBUG(LOG_PARSER, "Создан операнд с непосредственным значением");
+        }
         parser_advance(parser);
         return operand;
     }
     else if (parser->current.token.type == TOKEN_REGISTER) {
-        // Регистр
+        LOG_DEBUG(LOG_PARSER, "Обнаружен регистр");
+        if (is_negative) {
+            parser_set_error(parser, "Знак минус не может использоваться с регистром", NULL);
+            return NULL;
+        }
+        
         operand = ast_create_register_operand(parser->ast, parser->current.token.value);
+        if (operand) {
+            LOG_DEBUG(LOG_PARSER, "Создан операнд с регистром");
+        }
+        parser_advance(parser);
+        return operand;
+    }
+    else if (parser->current.token.type == TOKEN_NUMBER ||
+             parser->current.token.type == TOKEN_BINARY_NUMBER ||
+             parser->current.token.type == TOKEN_OCTAL_NUMBER ||
+             parser->current.token.type == TOKEN_HEX_NUMBER ||
+             parser->current.token.type == TOKEN_TERNARY_NUMBER) {
+        LOG_DEBUG(LOG_PARSER, "Обнаружено числовое значение");
+        operand = ast_create_immediate_operand(parser->ast, parser->current.token.value, parser->current.token.text);
+        if (operand && is_negative) {
+            operand->immediate = -operand->immediate;
+            LOG_DEBUG(LOG_PARSER, "Создан операнд с отрицательным числовым значением");
+        } else {
+            LOG_DEBUG(LOG_PARSER, "Создан операнд с числовым значением");
+        }
+        parser_advance(parser);
+        return operand;
+    }
+    else if (parser->current.token.type == TOKEN_IDENTIFIER) {
+        // Метка
+        LOG_DEBUG(LOG_PARSER, "Обнаружена метка");
+        if (is_negative) {
+            parser_set_error(parser, "Знак минус не может использоваться с меткой", NULL);
+            return NULL;
+        }
+        operand = ast_create_label_operand(parser->ast, parser->current.token.text);
+        if (operand) {
+            LOG_DEBUG(LOG_PARSER, "Создан операнд с меткой");
+        }
         parser_advance(parser);
         return operand;
     }
     
-    parser_set_error(parser, "Ожидался операнд (регистр или непосредственное значение)", NULL);
+    LOG_DEBUG(LOG_PARSER, "Не удалось разобрать операнд");
+    parser_set_error(parser, "Ожидался операнд", NULL);
     return NULL;
 }
 

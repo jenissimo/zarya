@@ -8,7 +8,17 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # Опции сборки
 option(BUILD_TESTS "Build tests" ON)
 option(ENABLE_WARNINGS "Enable warnings" ON)
+option(BUILD_DOCS "Build documentation" ON)
 #option(ENABLE_ASAN "Enable Address Sanitizer" ON)
+
+# Поиск Python для генерации документации
+if(BUILD_DOCS)
+    find_package(Python3 COMPONENTS Interpreter)
+    if(NOT Python3_FOUND)
+        message(WARNING "Python3 не найден. Генерация документации будет отключена.")
+        set(BUILD_DOCS OFF)
+    endif()
+endif()
 
 # Установка флагов компилятора
 if(ENABLE_WARNINGS)
@@ -52,10 +62,10 @@ target_include_directories(common_lib PUBLIC src/common)
 # Библиотека ТРИАС
 add_library(trias_lib
     src/trias/lexer.c
-    src/trias/trias_instructions.c
     src/trias/parser.c
     src/trias/ast.c
     src/trias/symbol_table.c
+    src/trias/semantic_analyzer.c
 )
 
 target_link_libraries(trias_lib PRIVATE common_lib)
@@ -127,7 +137,26 @@ if(BUILD_TESTS)
     add_zarya_test(test_parser tests/trias/test_parser.c)
     add_zarya_test(test_parser_instructions tests/trias/test_parser_instructions.c)
     add_zarya_test(test_symbol_table tests/trias/test_symbol_table.c)
+    add_zarya_test(test_semantic_analyzer tests/trias/test_semantic_analyzer.c)
 
     # Общие тесты
     add_zarya_test(test_trits tests/common/test_trits.c)
+endif()
+
+# Добавляем цель для генерации документации
+if(BUILD_DOCS AND Python3_FOUND)
+    add_custom_target(docs
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/gen_docs.py
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMENT "Генерация документации..."
+        VERBATIM
+    )
+    
+    # Добавляем зависимость от исходных файлов
+    add_custom_command(
+        TARGET docs
+        DEPENDS
+            ${PROJECT_SOURCE_DIR}/include/instruction_defs.h
+            ${PROJECT_SOURCE_DIR}/tools/gen_docs.py
+    )
 endif() 

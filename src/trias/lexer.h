@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdbool.h>
+#include "instruction_defs.h"
 #include "zarya_config.h"
 
 // Типы токенов
@@ -19,8 +20,10 @@ typedef enum {
     TOKEN_COLON,        // Двоеточие (метка)
     TOKEN_COMMA,        // Запятая
     TOKEN_HASH,         // # (непосредственное значение)
+    TOKEN_MINUS,        // - (отрицательное значение)
     TOKEN_AT,          // @ (косвенная адресация)
-    TOKEN_REGISTER,     // R0-R7
+    TOKEN_DOT,         // . (точка)
+    TOKEN_REGISTER,     // R0-R3
     TOKEN_ERROR        // Ошибка лексического анализа
 } token_type_t;
 

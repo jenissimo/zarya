@@ -113,24 +113,39 @@ vm_error_t vm_load_program(vm_state_t* vm, const tryte_t* program, size_t size) 
     return VM_OK;
 }
 
+// Чтение инструкции из памяти
+static vm_error_t fetch_instruction(vm_state_t* vm, instruction_t* inst) {
+    if (!vm || !inst) return VM_ERROR_INVALID_ADDRESS;
+    
+    // Проверяем выход за границы памяти
+    if (vm->pc.value < 0 || (size_t)vm->pc.value >= vm->memory_size) {
+        return VM_ERROR_INVALID_ADDRESS;
+    }
+    
+    // Проверяем, что хватает места для всей инструкции
+    if ((size_t)vm->pc.value + 2 >= vm->memory_size) {
+        return VM_ERROR_INVALID_ADDRESS;
+    }
+    
+    // Читаем инструкцию
+    inst->opcode = vm->memory[vm->pc.value];
+    inst->operand1 = vm->memory[vm->pc.value + 1];
+    inst->operand2 = vm->memory[vm->pc.value + 2];
+    
+    return VM_OK;
+}
+
 vm_error_t vm_step(vm_state_t* vm) {
     if (!vm) {
         return VM_ERROR_INVALID_PARAMETER;
     }
 
-    // Проверяем выход за границы памяти
-    if (vm->pc.value < 0 || (size_t)vm->pc.value >= vm->memory_size) {
-        return VM_ERROR_INVALID_ADDRESS;
-    }
-
     // Читаем инструкцию
     instruction_t inst;
-    if ((size_t)vm->pc.value + 2 >= vm->memory_size) {
-        return VM_ERROR_INVALID_ADDRESS;
+    vm_error_t err = fetch_instruction(vm, &inst);
+    if (err != VM_OK) {
+        return err;
     }
-    inst.opcode = vm->memory[vm->pc.value];
-    inst.operand1 = vm->memory[vm->pc.value + 1];
-    inst.operand2 = vm->memory[vm->pc.value + 2];
 
     // Выводим содержимое памяти для отладки
     printf("Memory at PC=%d: [%d, %d, %d]\n", 
@@ -152,7 +167,7 @@ vm_error_t vm_step(vm_state_t* vm) {
     int old_pc = vm->pc.value;
     
     // Выполняем инструкцию
-    vm_error_t err = execute_instruction(vm, &inst);
+    err = execute_instruction(vm, &inst);
     if (err != VM_OK) {
         return err;
     }
@@ -166,28 +181,6 @@ vm_error_t vm_step(vm_state_t* vm) {
     if ((size_t)vm->pc.value >= vm->memory_size) {
         return VM_ERROR_INVALID_ADDRESS;
     }
-    
-    return VM_OK;
-}
-
-// Чтение инструкции из памяти
-static vm_error_t fetch_instruction(vm_state_t* vm, instruction_t* inst) {
-    if (!vm || !inst) return VM_ERROR_INVALID_ADDRESS;
-    
-    // Проверяем выход за границы памяти
-    if (vm->pc.value < 0 || (size_t)vm->pc.value >= vm->memory_size) {
-        return VM_ERROR_INVALID_ADDRESS;
-    }
-    
-    // Проверяем, что хватает места для всей инструкции
-    if ((size_t)vm->pc.value + 2 >= vm->memory_size) {
-        return VM_ERROR_INVALID_ADDRESS;
-    }
-    
-    // Читаем инструкцию
-    inst->opcode = vm->memory[vm->pc.value];
-    inst->operand1 = vm->memory[vm->pc.value + 1];
-    inst->operand2 = vm->memory[vm->pc.value + 2];
     
     return VM_OK;
 }

@@ -49,6 +49,8 @@ static const struct {
     {LOG_VM, "VM"},
     {LOG_AST, "AST"},
     {LOG_TRITS, "TRITS"},
+    {LOG_TRIAS, "TRIAS"},
+    {LOG_SEMANTIC, "SEMANTIC"},
     {0, NULL}
 };
 

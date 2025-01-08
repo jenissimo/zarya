@@ -6,20 +6,24 @@
 #include "zarya_vm.h"
 #include "instruction_defs.h"
 
-// Опкоды инструкций
-typedef enum {
-#define DEFINE_OPCODE(name, value, operands, desc, group, handler) OP_##name = value,
-    INSTRUCTION_LIST(DEFINE_OPCODE)
-#undef DEFINE_OPCODE
-    OP_COUNT       // Количество опкодов
-} opcode_t;
-
 // Структура для хранения инструкции
 typedef struct {
-    tryte_t opcode;    // Код операции
+    tryte_t opcode;    // Код операции (включая режим адресации в старшем трите)
     tryte_t operand1;  // Первый операнд (для инструкций, требующих параметров)
     tryte_t operand2;  // Второй операнд (для инструкций, требующих параметров)
 } instruction_t;
+
+// Получение режима адресации
+static inline trit_t get_addressing_mode(const instruction_t* inst) {
+    return GET_ADDR_MODE(inst->opcode.value);
+}
+
+// Создание инструкции с заданным режимом адресации
+static inline instruction_t make_instruction(int opcode, trit_t mode) {
+    instruction_t inst = {0};
+    inst.opcode = MAKE_OPCODE(mode, opcode);
+    return inst;
+}
 
 // Декодирование инструкции из машинного слова
 instruction_t decode_instruction(const word_t* word);

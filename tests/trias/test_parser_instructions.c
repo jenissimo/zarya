@@ -4,6 +4,7 @@
 #include "trias/ast.h"
 #include "zarya_vm.h"
 #include "zarya_config.h"
+#include "logging.h"
 
 static vm_state_t vm;
 static ast_manager_t* ast_manager;

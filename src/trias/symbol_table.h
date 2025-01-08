@@ -59,6 +59,9 @@ symbol_table_t* symbol_table_create(void);
 // Уничтожение таблицы символов
 void symbol_table_destroy(symbol_table_t* table);
 
+// Очистка таблицы символов
+void symbol_table_clear(symbol_table_t* table);
+
 // Создание новой области видимости
 scope_t* symbol_table_push_scope(symbol_table_t* table, const char* name);
 
@@ -83,5 +86,8 @@ vm_error_t symbol_table_define(symbol_table_t* table, const char* name,
 // Итерация по символам (для отладки и кодогенерации)
 typedef void (*symbol_visitor_t)(symbol_t* symbol, void* user_data);
 void symbol_table_foreach(symbol_table_t* table, symbol_visitor_t visitor, void* user_data);
+
+// Получение текущей области видимости
+scope_t* symbol_table_get_current_scope(symbol_table_t* table);
 
 #endif // SYMBOL_TABLE_H 

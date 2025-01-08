@@ -579,24 +579,29 @@ void ast_destroy_directive(ast_node_t* node) {
 
 // Уничтожение операнда
 void ast_destroy_operand(ast_node_t* node) {
-    if (!node || node->type != AST_OPERAND) return;
+    if (!node) return;
     
     ast_operand_t* operand = (ast_operand_t*)node;
     if (operand->type == OPERAND_LABEL && operand->label) {
         free(operand->label);
-        operand->label = NULL;
     }
-    
+    if (operand->source_text) {
+        free(operand->source_text);
+        operand->source_text = NULL;
+    }
     free(operand);
 }
 
 // Специализированные функции создания операндов
-ast_operand_t* ast_create_immediate_operand(ast_manager_t* manager, token_value_t value) {
+ast_operand_t* ast_create_immediate_operand(ast_manager_t* manager, token_value_t value, const char* text) {
     source_loc_t loc = {0, 0}; // Позиция будет установлена позже
     ast_operand_t* operand = ast_create_operand(manager, OPERAND_IMMEDIATE, &loc);
     if (!operand) return NULL;
     
     operand->immediate = value.number;
+    if (text) {
+        operand->source_text = strdup(text);
+    }
     return operand;
 }
 

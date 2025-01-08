@@ -58,6 +58,7 @@ typedef struct {
         char* label;          // Имя метки
     };
     bool is_indirect;          // Флаг косвенной адресации
+    char* source_text;         // Исходный текст числа (для троичных чисел)
 } ast_operand_t;
 
 // Инструкция
@@ -104,7 +105,7 @@ ast_directive_t* ast_create_directive(ast_manager_t* manager, const char* name, 
 ast_operand_t* ast_create_operand(ast_manager_t* manager, operand_type_t type, const source_loc_t* loc);
 
 // Специализированные функции создания операндов
-ast_operand_t* ast_create_immediate_operand(ast_manager_t* manager, token_value_t value);
+ast_operand_t* ast_create_immediate_operand(ast_manager_t* manager, token_value_t value, const char* text);
 ast_operand_t* ast_create_register_operand(ast_manager_t* manager, token_value_t value);
 ast_operand_t* ast_create_indirect_operand(ast_manager_t* manager, token_value_t value);
 ast_operand_t* ast_create_label_operand(ast_manager_t* manager, const char* label);
